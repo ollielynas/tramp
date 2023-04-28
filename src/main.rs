@@ -1,6 +1,6 @@
-use egui::{widgets};
-use macroquad::prelude::*;
-use std::io;
+use egui::{widgets, Id};
+use macroquad::{prelude::*, time};
+use std::{io, ops::RangeInclusive};
 
 #[derive(PartialEq, Eq, Hash, Clone, Copy)]
 enum Shape {
@@ -15,6 +15,7 @@ enum BodyPart {
     Front,
     Back,
     Head,
+    Seat,
 }
 #[derive(PartialEq, Eq, Hash, Clone, Copy)]
 enum FlipDirection {
@@ -29,7 +30,7 @@ impl BodyPart {
             BodyPart::Front => "front",
             BodyPart::Back => "back",
             BodyPart::Head => "head",
-
+            BodyPart::Seat => "seat",
         }
         .to_owned()
     }
@@ -49,6 +50,8 @@ impl BodyPart {
                 BodyPart::Front => BodyPart::Back,
                 BodyPart::Head => BodyPart::Feet,
                 BodyPart::Feet => BodyPart::Head,
+                BodyPart::Seat => BodyPart::Head,
+
             }
         } else if amount == 0.25 {
             match &self {
@@ -57,6 +60,8 @@ impl BodyPart {
                 BodyPart::Feet if direction == FlipDirection::Backward => BodyPart::Back,
                 BodyPart::Head if direction == FlipDirection::Forward => BodyPart::Back,
                 BodyPart::Head if direction == FlipDirection::Backward => BodyPart::Front,
+                BodyPart::Seat if direction == FlipDirection::Forward => BodyPart::Back,
+                BodyPart::Seat if direction == FlipDirection::Backward => BodyPart::Front,
                 _ => BodyPart::Feet,
                 }
         }else {
@@ -64,6 +69,8 @@ impl BodyPart {
                 BodyPart::Back | BodyPart::Front => BodyPart::Feet,
                 BodyPart::Feet if direction == FlipDirection::Forward => BodyPart::Back,
                 BodyPart::Feet if direction == FlipDirection::Backward => BodyPart::Front,
+                BodyPart::Seat if direction == FlipDirection::Forward => BodyPart::Back,
+                BodyPart::Seat if direction == FlipDirection::Backward => BodyPart::Front,
                 BodyPart::Head if direction == FlipDirection::Forward => BodyPart::Front,
                 BodyPart::Head if direction == FlipDirection::Backward => BodyPart::Back,
                 _ => BodyPart::Feet,
@@ -77,6 +84,7 @@ impl BodyPart {
 struct Skill {
     flip: f32,
     from: BodyPart,
+    to: BodyPart,
     twist: Vec<f32>,
     shape: Shape,
     direction: FlipDirection,
@@ -95,9 +103,9 @@ fn fraction(num: f32) -> String {
         return "full".to_owned();
     }else {
     let str = num.to_string()
-        .replace(".5", "1/2")
-        .replace(".25", "1/4")
-        .replace(".75", "3/4");
+        .replace(".5", " 1/2")
+        .replace(".25", " 1/4")
+        .replace(".75", " 3/4");
     if num - num.fract() < 0.0 {
         let str = str.replace("0", "");
     }
@@ -125,7 +133,7 @@ impl Skill {
         };
         if self.flip == 0.0 {
             name = "".to_owned();
-            if self.twist.iter().sum::<f32>() == 0.0 {
+            if self.twist.iter().sum::<f32>() == 0.0 && self.to != BodyPart::Seat {
                 return match self.shape {
                     Shape::Straight => "Straight Jump",
                     Shape::Pike => "Pike Jump",
@@ -152,7 +160,7 @@ impl Skill {
                     name += match self.twist[0] {0.0 => "".to_owned(), _ => format!(" {} twist", fraction(self.twist[0]))}.as_str();
                 }
                 if self.flip.fract() != 0.0 || self.from != BodyPart::Feet {
-                    name += format!(", from {} to {}",self.from.name(), self.from.add(self.flip.fract(), self.direction, self.twist.iter().sum()).name()).as_str();
+                    name += format!(", from {} to {}",self.from.name(), self.to.name()).as_str();
                 }
         name = name.to_owned();
 
@@ -177,7 +185,14 @@ impl Skill {
                 Shape::Straight => " /",
                 Shape::Pike => " <",
                 Shape::Tuck => " o",
-            })
+            }) + match self.direction {
+                FlipDirection::Forward => " f",
+                FlipDirection::Backward => "",
+            } + match self.to {
+                BodyPart::Seat => " -1",
+                _ => ""
+            }
+
     }
     fn diff(&self) -> f32 {
         let mut diff = 0.0;
@@ -206,7 +221,8 @@ impl Skill {
         }
         return (diff*100.0).round()/100.0;
     }
-    fn from_notation(notation: String) -> Option<Skill> {
+    fn from_notation(notation: String, from:BodyPart) -> Option<Skill> {
+
         let mut num_flips = 0;
         let shape = match (notation.contains("o"), notation.contains("<"), notation.contains("/")) {
             (true, false, false) => Shape::Tuck,
@@ -216,7 +232,12 @@ impl Skill {
                 return None;
             }
         };
+
+        let forwards = notation.contains("f");
+        let to_seat = notation.contains("-1");
+
         let notation = notation
+            .replace("-1", "")
             .chars()
             .filter(|x| x.is_ascii_digit())
             .collect::<String>();
@@ -227,11 +248,16 @@ impl Skill {
             let potential_number_of_flips = current_text.parse::<i32>().unwrap_or(0);
             let remaining_chars = notation.len() - i;
 
-            if potential_number_of_flips > (remaining_chars * 4).try_into().unwrap() {
+            if potential_number_of_flips > match (remaining_chars * 4).try_into() {Ok(a) => a, Err(e) => -1} {
                 break;
             }
+            
             num_flips = potential_number_of_flips;
         }
+        // if num_flips != (notation.length() - num_flips.to_string().length())/4.0 {
+        //         println!("{} {} {}", potential_number_of_flips, remaining_chars, notation.len());
+        //         return None;
+        // }
 
         if notation.len() == 1 {
             num_flips = 0;
@@ -245,10 +271,20 @@ impl Skill {
             .collect::<Vec<f32>>();
 
         return Some(Skill {
-            direction: FlipDirection::Forward,
+            to: match to_seat {
+                true => BodyPart::Seat,
+                false => from.add(((num_flips as f32) / 4.0).fract(), match forwards {
+                true => FlipDirection::Forward,
+                false => FlipDirection::Backward,
+            }, twist.iter().sum()),
+            },
+            direction: match forwards {
+                true => FlipDirection::Forward,
+                false => FlipDirection::Backward,
+            },
             flip: (num_flips as f32) / 4.0,
             twist,
-            from: BodyPart::Feet,
+            from,
             edit_text: notation + match &shape {
                 Shape::Straight => " /",
                 Shape::Pike => " <",
@@ -258,66 +294,157 @@ impl Skill {
         });
     }
 
-    fn display(&mut self, egui_ctx: &egui::Context, ui: &mut egui::Ui) {
+    fn display(&mut self, egui_ctx: &egui::Context, ui: &mut egui::Ui, from:BodyPart) -> BodyPart {
+        let mut changed = false;
             ui.horizontal(|ui| {
                 ui.collapsing("", |ui| {
                     ui.label("Notation                  ");
                     ui.shrink_width_to_current();
-                    if ui.text_edit_singleline(&mut self.edit_text).changed() {
-                    if let Some(skill) = Skill::from_notation(self.edit_text.clone()) {
-                        self.flip = skill.flip;
-                        self.twist = skill.twist;
-                        self.shape = skill.shape;
+                    ui.horizontal(|ui| {
+                        ui.text_edit_singleline(&mut self.edit_text);
+                        if let Some(skill) = Skill::from_notation(self.edit_text.clone(), from) {
+                            self.flip = skill.flip;
+                            self.twist = skill.twist;
+                            self.shape = skill.shape;
+                            self.from = skill.from;
+                            self.to = skill.to;
+                            self.direction = skill.direction;
+                            ui.label("✓");
+                        }else {
+                            ui.label("x");
+                        }
+                    });
+                    ui.separator();
+                    ui.label("Flip");
+                    egui::ComboBox::from_label("Twist").selected_text(format!("{}, {}°",fraction(self.flip) ,(self.flip*180.0) as i32)).show_ui(ui, |ui| {
+                    for l in 0..=28 {
+                        ui.selectable_value(&mut self.flip, l as f32/4.0, format!("{}, {}°",fraction(l as f32/4.0), l*90));
                     }
+                    });
+                    while self.twist.len() > (self.flip/4.0).ceil() as usize {
+                        self.twist.pop();
                     }
+                    for i in 0..(self.flip/4.0).ceil() as usize {
+                        if self.twist.len() <= i {
+                            self.twist.push(0.0);
+                        }
+                        ui.horizontal(|ui| {
+                            egui::ComboBox::from_label("Twist").selected_text(format!("{}, {}°",fraction(self.twist[i]), (self.twist[i]*180.0) as i32)).show_ui(ui, |ui| {
+                                for l in 0..=9 {
+                                    ui.selectable_value(&mut self.twist[i], l as f32/2.0, format!("{}, {}°",fraction(l as f32/2.0), l*180));
+                                }
+                            });
+                        });
+                    }
+                    
                     ui.label("Shape");
-                    ui.radio_value(&mut self.shape, Shape::Tuck, "tuck").changed();
-                    ui.radio_value(&mut self.shape, Shape::Pike, "pike").changed();
-                    ui.radio_value(&mut self.shape, Shape::Straight, "straight").changed();
+                    ui.horizontal(|ui| {
+                    ui.radio_value(&mut self.shape, Shape::Tuck, "tuck").changed().then(|| {changed = true});
+                    ui.radio_value(&mut self.shape, Shape::Pike, "pike").changed().then(|| {changed = true});
+                    ui.radio_value(&mut self.shape, Shape::Straight, "straight").changed().then(|| {changed = true});
+                    });
                     ui.label("FlipDirection");
-                    ui.radio_value(&mut self.direction, FlipDirection::Forward, "forward").changed();
-                    ui.radio_value(&mut self.direction, FlipDirection::Backward, "backward").changed();
+                    ui.horizontal(|ui| {
+                    ui.radio_value(&mut self.direction, FlipDirection::Forward, "forward").changed().then(|| {changed = true});
+                    ui.radio_value(&mut self.direction, FlipDirection::Backward, "backward").changed().then(|| {changed = true});
+                    });
+                    ui.label("Seat Drop");
+                    ui.horizontal(|ui| {
+                    let new_body = match self.to 
+                        {
+                            BodyPart::Seat => BodyPart::Feet,
+                            BodyPart::Back => BodyPart::Back,
+                            BodyPart::Feet => BodyPart::Feet,
+                            BodyPart::Front => BodyPart::Front,
+                            BodyPart::Head => BodyPart::Head,
+                        };
+                    ui.radio_value(&mut self.to, BodyPart::Seat, "To Seat").changed().then(|| {changed = true});
+                    ui.radio_value(&mut self.to, new_body, format!("To {}",new_body.name())).changed().then(|| {changed = true});
+                    });
                 });
                 ui.label(self.name());
                 ui.label(format!("Diff: {}", self.diff())).on_hover_text("Difficulty");
             });
-            
+        if changed {
+            self.edit_text = self.notation();
+        }
+        return self.to;
     }
 }
 
+#[derive(PartialEq, Clone, Copy)]
+enum  Tab {
+    Edit,
+    Info,
+    DragAndDrop,
+    Metadata
+}
 
 struct Routine {
     skills: [Skill;10],
-
+    name: String,
+    current_tab: Tab,
+    id: String,
 }
 
 impl Routine {
     fn display(&mut self, egui_ctx: &egui::Context,) {
-        egui::Window::new("Routine").show(egui_ctx, |ui| {
-            for (i, skill) in self.skills.iter_mut().enumerate() {
+        egui::Window::new(format!("Routine: {}", self.name)).id(Id::new(&self.id)).show(egui_ctx, |ui| {
+            let mut from = BodyPart::Feet;
+            ui.text_edit_singleline(&mut self.name);
+            ui.horizontal(|ui| {
+                if self.current_tab == Tab::Edit {ui.label("Edit");} else {ui.small_button("Edit").clicked().then(|| {self.current_tab = Tab::Edit});}
+                ui.separator();
+                if self.current_tab == Tab::Info {ui.label("Info");} else {ui.small_button("Info").clicked().then(|| {self.current_tab = Tab::Info});}
+                ui.separator();
+                if self.current_tab == Tab::DragAndDrop {ui.label("Drag and Drop");} else {ui.small_button("Drag and Drop").clicked().then(|| {self.current_tab = Tab::DragAndDrop});}
+                ui.separator();
+                if self.current_tab == Tab::Metadata {ui.label("Metadata");} else {ui.small_button("Metadata").clicked().then(|| {self.current_tab = Tab::Metadata});}
+
+            });
+            ui.separator();
+            match self.current_tab {
+                Tab::Edit => {
+                for (i, skill) in self.skills.iter_mut().enumerate() {
                 ui.push_id(i, |ui| {
                     ui.horizontal(|ui| {
                         ui.label(format!("{}: ", i+1));
-                        skill.display(egui_ctx, ui);
+                        from = skill.display(egui_ctx, ui, from);
                     });
                     });
             }
+                },
+                Tab::Info => {
+                    ui.label(format!("Total Difficulty: {}", self.skills.iter().map(|s|s.diff()).sum::<f32>()));
+                    ui.separator();
+                    let largest_rotation =  self.skills.iter().map(|s| s.flip).map(|i| (i*4.0) as i32).max().unwrap_or(0);
+                    ui.label(format!("Largest Rotation {} ({} degrees)", largest_rotation as f32/4.0, largest_rotation as f32/4.0 * 360.0));
+                    let largest_twist =  self.skills.iter().map(|s| s.twist.iter().sum::<f32>()).map(|i| (i*2.0) as i32).max().unwrap_or(0);
+                    ui.label(format!("Largest Twist {} ({} degrees)", largest_twist as f32/2.0, largest_twist as f32/2.0 * 360.0));
+                },
+                Tab::DragAndDrop =>  {},
+                Tab::Metadata => {},
+            }
+            
         });
     }
     fn blank() -> Routine {
         Routine {
             skills: [
-                Skill::from_notation("0 o".to_owned()).unwrap(),
-                Skill::from_notation("0 o".to_owned()).unwrap(),
-                Skill::from_notation("0 o".to_owned()).unwrap(),
-                Skill::from_notation("0 o".to_owned()).unwrap(),
-                Skill::from_notation("0 o".to_owned()).unwrap(),
-                Skill::from_notation("0 o".to_owned()).unwrap(),
-                Skill::from_notation("0 o".to_owned()).unwrap(),
-                Skill::from_notation("0 o".to_owned()).unwrap(),
-                Skill::from_notation("0 o".to_owned()).unwrap(),
-                Skill::from_notation("0 o".to_owned()).unwrap(),
+                Skill::from_notation("0 o".to_owned(), BodyPart::Feet).unwrap(),
+                Skill::from_notation("0 o".to_owned(), BodyPart::Feet).unwrap(),
+                Skill::from_notation("0 o".to_owned(), BodyPart::Feet).unwrap(),
+                Skill::from_notation("0 o".to_owned(), BodyPart::Feet).unwrap(),
+                Skill::from_notation("0 o".to_owned(), BodyPart::Feet).unwrap(),
+                Skill::from_notation("0 o".to_owned(), BodyPart::Feet).unwrap(),
+                Skill::from_notation("0 o".to_owned(), BodyPart::Feet).unwrap(),
+                Skill::from_notation("0 o".to_owned(), BodyPart::Feet).unwrap(),
+                Skill::from_notation("0 o".to_owned(), BodyPart::Feet).unwrap(),
+                Skill::from_notation("0 o".to_owned(), BodyPart::Feet).unwrap(),
             ],
+            name: "New Routine".to_owned(),
+            current_tab: Tab::Edit,
+            id: time::get_time().to_string(),
         }
     }
 }

@@ -1,15 +1,24 @@
 use egui::{ widgets, Id };
 use macroquad::{ prelude::*, time };
-use std::{ io, ops::RangeInclusive };
+use std::{ io, ops::RangeInclusive, fs };
+mod common_skills;
+use common_skills::SKILLS;
+use phf::phf_map;
+extern crate savefile;
+use savefile::prelude::*;
+use std::time::{UNIX_EPOCH, Instant};
+#[macro_use]
+extern crate savefile_derive;
+use std::env;
 
-#[derive(PartialEq, Eq, Hash, Clone, Copy)]
+#[derive(PartialEq, Eq, Hash, Clone, Copy, Savefile)]
 enum Shape {
     Straight,
     Pike,
     Tuck,
 }
 
-#[derive(PartialEq, Eq, Hash, Clone, Copy)]
+#[derive(PartialEq, Eq, Hash, Clone, Copy, Savefile)]
 enum BodyPart {
     Feet,
     Front,
@@ -17,7 +26,7 @@ enum BodyPart {
     Head,
     Seat,
 }
-#[derive(PartialEq, Eq, Hash, Clone, Copy)]
+#[derive(PartialEq, Eq, Hash, Clone, Copy, Savefile)]
 enum FlipDirection {
     Forward,
     Backward,
@@ -79,6 +88,7 @@ impl BodyPart {
     }
 }
 
+#[derive(PartialEq, Clone, Savefile)]
 struct Skill {
     flip: f32,
     from: BodyPart,
@@ -109,16 +119,18 @@ fn fraction(num: f32) -> String {
     }
 }
 
-fn circle_icon(ui: &mut egui::Ui, openness: f32, response: &egui::Response) {
-    // let stroke = ui.style().interact(&response).fg_stroke;
-    // let radius = egui::lerp(2.0..=3.0, openness);
-    // ui.painter().circle_filled(response.rect.center(), radius, stroke.color);
+fn no_icon(ui: &mut egui::Ui, openness: f32, response: &egui::Response) {
 }
 
 impl Skill {
     /// todo
 
     fn name(&self) -> String {
+
+        if let Some(name) = SKILLS.get(&self.notation()) {
+            return name.to_owned().to_owned();
+        }
+
         let mut name: String = match self.flip.to_string().as_str() {
             "1" => "Single, ".to_owned(),
             "2" => "Double, ".to_owned(),
@@ -130,23 +142,12 @@ impl Skill {
             FlipDirection::Forward => "Forward, ",
             FlipDirection::Backward => "Backward, ",
         };
-        if self.flip == 0.0 {
-            name = "".to_owned();
-            if self.twist.iter().sum::<f32>() == 0.0 && self.to != BodyPart::Seat {
-                return (
-                    match self.shape {
-                        Shape::Straight => "Straight Jump",
-                        Shape::Pike => "Pike Jump",
-                        Shape::Tuck => "Tuck Jump",
-                    }
-                ).to_owned();
-            }
-        }
+        
         if self.twist.len() > 1 {
             name += format!(
                 " {} {} {}",
-                match self.twist[0] {
-                    0.0 => "".to_owned(),
+                match self.twist[0].ceil() as i32 {
+                    0 => "".to_owned(),
                     _ => format!("{} in,", fraction(self.twist[0])),
                 },
                 self.twist
@@ -158,7 +159,7 @@ impl Skill {
                     .collect::<Vec<String>>()
                     .join(" twist,"),
                 match self.twist.last() {
-                    Some(0.0) => "",
+                    Some(a) if a.ceil() != 0.0 => "",
                     _ => "out",
                 }
             ).as_str();
@@ -231,7 +232,6 @@ impl Skill {
             }
             Shape::Tuck => {}
         }
-        println!("{diff}");
         return (diff * 100.0).round() / 100.0;
     }
     fn from_notation(notation: String, from: BodyPart) -> Option<Skill> {
@@ -330,7 +330,7 @@ impl Skill {
             egui::CollapsingHeader
                 ::new(self.name())
                 .id_source(id)
-                .icon(circle_icon)
+                .icon(no_icon)
                 .show(ui, |ui| {
                     ui.label("Notation                  ");
                     ui.shrink_width_to_current();
@@ -502,14 +502,14 @@ impl Skill {
     }
 }
 
-#[derive(PartialEq, Clone, Copy)]
+#[derive(PartialEq, Clone, Copy, Savefile)]
 enum Tab {
     Edit,
     Info,
     DragAndDrop,
     Metadata,
 }
-
+#[derive(PartialEq, Clone, Savefile)]
 struct Routine {
     skills: [Skill; 10],
     name: String,
@@ -523,6 +523,7 @@ impl Routine {
         egui::Window
             ::new(format!("Routine: {}", self.name))
             .id(Id::new(&self.id))
+            .scroll2([true,true])
             .open(&mut self.open)
             .show(egui_ctx, |ui| {
                 let mut from = BodyPart::Feet;
@@ -626,8 +627,20 @@ impl Routine {
                             )
                         );
                     }
-                    Tab::DragAndDrop => {}
-                    Tab::Metadata => {}
+                    Tab::DragAndDrop => {
+                        ui.label("Drag and Drop");
+
+                    }
+                    Tab::Metadata => {
+                        ui.label(format!("Id: {}", self.id));
+                        let root = match env::current_dir() {
+                            Ok(path) => path.display().to_string(),
+                            Err(a) => format!("{a}"),
+                        };
+
+                        ui.label(format!("Root: {root}"));
+                        ui.label(format!("Path: {root}/routines/{}.bin", self.id));
+                    }
                 }
             });
     }
@@ -647,7 +660,7 @@ impl Routine {
             ],
             name: "New Routine".to_owned(),
             current_tab: Tab::Edit,
-            id: time::get_time().to_string(),
+            id: UNIX_EPOCH.elapsed().unwrap().as_secs().to_string(),
             open: true,
         }
     }
@@ -663,17 +676,73 @@ impl Data {
             r.display(&egui_ctx);
         }
     }
+
+    fn save(&self) {
+        match fs::create_dir_all("./Data/routines") {
+            Ok(_) => {}
+            Err(e) => {
+                error!("Error creating directory: {}", e)
+            }
+        };
+        for i in &self.routines {
+            match savefile::save_file(format!("Data/routines/{}.bin", i.id), 1, i) {
+                Ok(_) => {}
+                Err(e) => {
+                    error!("Error saving file: {}", e)
+                }
+            };
+        }
+    }
+
+    fn load_files(&mut self) {
+        self.save();
+        for file in match fs::read_dir("./Data/routines") {
+        Ok(file) => file,
+        Err(e) => {
+            error!("Error reading directory: {}", e);
+            return;
+        }
+        } {
+            self.routines.clear();
+            let file = match file {
+                Ok(file) => file,
+                Err(e) => {
+                    error!("Error reading file: {}", e);
+                    return;
+                }
+            };
+            let path = file.path();
+            let path = match path.to_str() {
+                Some(path) => path,
+                None => {
+                    error!("Error reading path");
+                    return;
+                }
+            };
+            let routine: Routine = match savefile::load_file(path, 1) {
+                Ok(routine) => routine,
+                Err(e) => {
+                    error!("Error loading file: {}", e);
+                    return;
+                }
+            };
+            self.routines.push(routine);
+    }
+
+    }
 }
 
 #[macroquad::main("Trampoline thing")]
 async fn main() {
+
     egui_macroquad::ui(|egui_ctx| {
         egui_ctx.set_visuals(egui::Visuals::light());
     });
     // get text input from user
     let mut data = Data {
-        routines: vec![Routine::blank()],
+        routines: vec![],
     };
+    data.load_files();
     loop {
         clear_background(WHITE);
         // Process keys, mouse etc.
@@ -692,7 +761,12 @@ async fn main() {
                         ui.selectable_value(&mut r.open, toggle, &r.name);
                     }
                 });
-                    
+                ui.heading("Files");
+                ui.separator();
+                ui.button("Save").clicked().then(|| {
+                    data.save();
+                });
+
                 
             });
             

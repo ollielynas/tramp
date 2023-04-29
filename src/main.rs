@@ -518,7 +518,9 @@ struct Routine {
     name: String,
     current_tab: Tab,
     id: String,
-    open: bool,
+    #[savefile_default_fn = "false_func"]
+    #[savefile_ignore]
+    open:bool,
 }
 
 struct Video {
@@ -929,12 +931,31 @@ impl WindowTheme {
 struct Data {
     routines: Vec<Routine>,
     theme: WindowTheme,
+    judged: Vec<Judged>,
 }
 
 impl Data {
     fn render(&mut self, egui_ctx: &egui::Context) {
         for r in self.routines.iter_mut() {
             r.display(&egui_ctx);
+        }
+        for r in self.judged.iter_mut() {
+            if r.open {
+            if r.routine_id == "" {
+                egui::Window::new("Select Routine").show(egui_ctx, |ui| {
+                    ui.label("Select a routine to judge");
+                    ui.separator();
+                    for i in self.routines.iter() {
+                        if ui.button(&i.name).clicked() {
+                            r.routine_id = i.id.clone();
+                        }
+                    }
+                });
+            }else {
+            r.display(&egui_ctx);
+            }
+        }
+
         }
     }
 
@@ -943,6 +964,20 @@ impl Data {
             Ok(_) => {}
             Err(e) => {
                 error!("Error creating directory: {}", e);
+            }
+        }
+        match fs::create_dir_all("./Data/judge") {
+            Ok(_) => {}
+            Err(e) => {
+                error!("Error creating directory: {}", e);
+            }
+        }
+        for i in self.judged.iter() {
+            match savefile::save_file(format!("Data/judge/{}.bin", i.id), 1, i) {
+                Ok(_) => {}
+                Err(e) => {
+                    error!("Error saving file: {}", e);
+                }
             }
         }
         for i in &self.routines {
@@ -968,15 +1003,13 @@ impl Data {
                 error!("Error loading file: {}", e);
             }
         }
-        for file in (
-            match fs::read_dir("./Data/routines") {
+        for file in match fs::read_dir("./Data/routines") {
                 Ok(file) => file,
                 Err(e) => {
                     error!("Error reading directory: {}", e);
                     return;
                 }
-            }
-        ) {
+            } {
             self.routines.clear();
             let file = match file {
                 Ok(file) => file,
@@ -1005,12 +1038,16 @@ impl Data {
     }
 }
 
-#[derive(Debug, Clone, Savefile)]
+#[derive(Debug, Clone, Savefile, Eq, PartialEq)]
 enum Panel {
+    Totals,
     Routine,
+    Diff,
+    HD,
     TOF,
     Execution,
     Deductions,
+
 }
 
 impl Default for Panel {
@@ -1023,8 +1060,13 @@ fn none_routine() -> Option<Routine> {
     None
 }
 
+fn false_func() -> bool{false}
+
 #[derive(Debug, Clone, Savefile)]
-struct RecordedRoutine {
+struct Judged {
+    #[savefile_default_fn = "false_func"]
+    #[savefile_ignore]
+    open:bool,
     #[savefile_default_fn = "none_routine"]
     #[savefile_ignore]
     routine: Option<Routine>,
@@ -1032,6 +1074,188 @@ struct RecordedRoutine {
     panel: Panel,
     routine_id: String,
     execution_1: [f32;10],
+    execution_5: [[f32;10];5],
+    five_juges: bool,
+    hd: [f32;10],
+    id: String,
+
+}
+
+impl Judged {
+    fn new() -> Judged {
+        Judged {
+            routine: None,
+            panel: Panel::Routine,
+            routine_id: String::new(),
+            execution_1: [0.0;10],
+            execution_5: [[0.0;10];5],
+            five_juges: false,
+            hd: [0.0;10],
+            id: UNIX_EPOCH.elapsed().unwrap().as_secs().to_string(),
+            open: true,
+        }
+    }
+
+    fn display(&mut self, egui_ctx:&egui::Context) {
+egui::Window
+            ::new(format!("Judged Routine: {}", self.id))
+            .open(&mut self.open)
+            .id(Id::new(&self.id)).show(egui_ctx, |ui| {
+            egui::ScrollArea::horizontal().show(ui, |ui| {
+
+            
+
+            if self.routine.is_none() {
+                match savefile::load_file(format!("Data/routines/{}.bin", self.routine_id), 1) {
+                    Ok(routine) => {
+                        self.routine = Some(routine);
+                    }
+                    Err(e) => {
+                        error!("Error loading file: {}", e);
+                    }
+                }
+            }
+            
+            ui.horizontal(|ui| {
+                    if self.panel == Panel::Routine {
+                        ui.label("Routine");
+                    } else {
+                        ui.small_button("Routine")
+                            .clicked()
+                            .then(|| {
+                                self.panel = Panel::Routine;
+                            });
+                    }
+                    ui.separator();
+                    if self.panel == Panel::Diff {
+                        ui.label("Difficulty");
+                    } else {
+                        ui.small_button("Difficulty")
+                            .clicked()
+                            .then(|| {
+                                self.panel = Panel::Diff;
+                            });
+                    }
+                    ui.separator();
+                    if self.panel == Panel::HD {
+                        ui.label("HD");
+                    } else {
+                        ui.small_button("HD")
+                            .clicked()
+                            .then(|| {
+                                self.panel = Panel::HD;
+                            });
+                    }
+                    ui.separator();
+                    if self.panel == Panel::TOF {
+                        ui.label("TOF");
+                    } else {
+                        ui.small_button("TOF")
+                            .clicked()
+                            .then(|| {
+                                self.panel = Panel::TOF;
+                            });
+                    }
+                    ui.separator();
+                    if self.panel == Panel::Execution {
+                        ui.label("Execution");
+                    } else {
+                        ui.small_button("Execution")
+                            .clicked()
+                            .then(|| {
+                                self.panel = Panel::Execution;
+                            });
+                    }
+                    ui.separator();
+                    if self.panel == Panel::Deductions {
+                        ui.label("Deductions");
+                    } else {
+                        ui.small_button("Deductions")
+                            .clicked()
+                            .then(|| {
+                                self.panel = Panel::Deductions;
+                            });
+                    }
+                    ui.separator();
+                    if self.panel == Panel::Totals {
+                        ui.label("Totals");
+                    } else {
+                        ui.small_button("Totals")
+                            .clicked()
+                            .then(|| {
+                                self.panel = Panel::Totals;
+                            });
+                    }
+                    
+                });
+            ui.separator();
+
+            match &self.panel {
+                &Panel::Routine => {
+                        for i in 0..10 {
+                        ui.label(format!("{}.) {}",i,self.routine.as_ref().unwrap().skills[i].name()));
+                    }
+                    
+                }
+                &Panel::Diff => {
+                    ui.label(format!("TotalDifficulty: +{}" ,(0..10).map(|i|(self.routine.as_ref().unwrap().skills[i].diff()*100.0)as i32).sum::<i32>()as f32 /100.0));
+                    ui.separator();
+                    for i in 0..10 {
+                    ui.label(format!("{}.) {}",i,self.routine.as_ref().unwrap().skills[i].diff()));
+                    }
+
+                }
+                &Panel::HD => {
+                    let mut total = 0.0;
+                    for i in 0..10 {
+                        total += self.hd[i];
+                    }
+                    ui.label(format!("Total HD: -{}" ,total));
+                    for i in 0..10 {
+                        ui.label(format!("{}.) {}",i,self.routine.as_ref().unwrap().skills[i].name()));
+                        ui.horizontal(|ui| {
+                            ui.radio_value(&mut self.hd[i], 0.0, "0.0");
+                            ui.radio_value(&mut self.hd[i], 0.1, "0.1");
+                            ui.radio_value(&mut self.hd[i], 0.2, "0.2");
+                            ui.radio_value(&mut self.hd[i], 0.3, "0.3");
+                        });
+                    }
+                }
+                &Panel::Execution => {
+                    ui.label(format!("Execution: -{}", match self.five_juges {
+                        false => {self.execution_1.iter().sum::<f32>()},
+                        true => {
+                            let totals = self.execution_5.iter().map(|x| x.iter().sum::<f32>());
+                            totals.max()
+                        }
+                    }));
+                    if self.five_juges {
+
+                    }else{
+                        let mut total = 0.0;
+                        for i in 0..10 {
+                        total += self.hd[i];
+                    }
+                    ui.label(format!("Total HD: -{}" ,total));
+                    for i in 0..10 {
+                        ui.label(format!("{}.) {}",i,self.routine.as_ref().unwrap().skills[i].name()));
+                        ui.horizontal(|ui| {
+                            ui.radio_value(&mut self.hd[i], 0.0, "0.0");
+                            ui.radio_value(&mut self.hd[i], 0.1, "0.1");
+                            ui.radio_value(&mut self.hd[i], 0.2, "0.2");
+                            ui.radio_value(&mut self.hd[i], 0.3, "0.3");
+                        });
+                    }
+                }
+                }
+
+            }
+                
+        });
+    });
+    }
+    
+
 }
 
 #[macroquad::main("Trampoline thing")]
@@ -1041,6 +1265,7 @@ async fn main() {
     let mut data = Data {
         routines: vec![],
         theme: WindowTheme::Light,
+        judged: vec![],
     };
 
     // let mut
@@ -1079,6 +1304,12 @@ async fn main() {
                         ui.selectable_value(&mut r.open, toggle, &r.name);
                     }
                 });
+                
+                ui.button("Judge Routine")
+                    .clicked()
+                    .then(|| {
+                        data.judged.push(Judged::new());
+                    });
                 ui.heading("Video");
                 ui.separator();
                 ui.button("load video")

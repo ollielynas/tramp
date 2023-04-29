@@ -551,9 +551,8 @@ impl Video {
             .duration("30")
             .input(&self.path)
             .hide_banner()
-            .filter("scale=\"160:-1\"")
             .filter("fps=fps=24")
-            .args(["-vf","drawtext=fontsize=60:fontcolor=red:text='%{e\\:t}':x=(w-text_w):y=(h-text_h)"])
+            .args(match self.timestamps {true => ["-vf","scale=720:-1, drawtext=fontsize=50:fontcolor=GreenYellow:text='%{e\\:t}':x=(w-text_w):y=(h-text_h)"], false => ["",""]})
             .args(["-f", "rawvideo", "-pix_fmt", "rgba", "-"])
             // .rawvideo()
             .spawn()?
@@ -587,7 +586,7 @@ impl Video {
     fn display(&mut self, egui_ctx: &egui::Context) {
         egui::Window
             ::new("Video")
-            .scroll2([true, true])
+            .scroll2([true, false])
             .min_height(match self.textures.get(self.current_frame) {
                 Some(a) => a.0.height() + 10.0,
                 _ => 0.0,
@@ -601,7 +600,7 @@ impl Video {
                         self.show_video = false;
                         if
                             ui
-                                .add_sized(ui.available_size(), egui::Button::new("download file"))
+                                .add_sized([ui.available_width(), ui.available_width()*0.65], egui::Button::new("download file"))
                                 .clicked()
                         {
                             self.load_textures();
@@ -1032,6 +1031,7 @@ struct RecordedRoutine {
     #[savefile_ignore]
     panel: Panel,
     routine_id: String,
+    execution_1: [f32;10],
 }
 
 #[macroquad::main("Trampoline thing")]

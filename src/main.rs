@@ -1,24 +1,29 @@
-use egui::{ widgets, Id };
+use egui::{ widgets, Id, Pos2 };
 use macroquad::{ prelude::*, time };
-use std::{ io, ops::RangeInclusive, fs };
+use std::{ fs, io::{ self, stdout, Write }, ops::RangeInclusive, process::Stdio, time::Duration };
 mod common_skills;
 use common_skills::SKILLS;
 use phf::phf_map;
 extern crate savefile;
 use savefile::prelude::*;
-use std::time::{UNIX_EPOCH, Instant};
+use std::time::{ Instant, UNIX_EPOCH };
 #[macro_use]
 extern crate savefile_derive;
+use nfd2::Response;
 use std::env;
+use strum::IntoEnumIterator;
+use strum_macros::EnumIter;
 
-#[derive(PartialEq, Eq, Hash, Clone, Copy, Savefile)]
+use ffmpeg_sidecar::{ self, command::FfmpegCommand, event::FfmpegEvent };
+
+#[derive(PartialEq, Eq, Hash, Clone, Copy, Savefile, Debug)]
 enum Shape {
     Straight,
     Pike,
     Tuck,
 }
 
-#[derive(PartialEq, Eq, Hash, Clone, Copy, Savefile)]
+#[derive(PartialEq, Eq, Hash, Clone, Copy, Savefile, Debug)]
 enum BodyPart {
     Feet,
     Front,
@@ -26,7 +31,7 @@ enum BodyPart {
     Head,
     Seat,
 }
-#[derive(PartialEq, Eq, Hash, Clone, Copy, Savefile)]
+#[derive(PartialEq, Eq, Hash, Clone, Copy, Savefile, Debug)]
 enum FlipDirection {
     Forward,
     Backward,
@@ -88,7 +93,7 @@ impl BodyPart {
     }
 }
 
-#[derive(PartialEq, Clone, Savefile)]
+#[derive(PartialEq, Clone, Savefile, Debug)]
 struct Skill {
     flip: f32,
     from: BodyPart,
@@ -119,14 +124,12 @@ fn fraction(num: f32) -> String {
     }
 }
 
-fn no_icon(ui: &mut egui::Ui, openness: f32, response: &egui::Response) {
-}
+fn no_icon(ui: &mut egui::Ui, openness: f32, response: &egui::Response) {}
 
 impl Skill {
     /// todo
 
     fn name(&self) -> String {
-
         if let Some(name) = SKILLS.get(&self.notation()) {
             return name.to_owned().to_owned();
         }
@@ -142,7 +145,7 @@ impl Skill {
             FlipDirection::Forward => "Forward, ",
             FlipDirection::Backward => "Backward, ",
         };
-        
+
         if self.twist.len() > 1 {
             name += format!(
                 " {} {} {}",
@@ -485,7 +488,7 @@ impl Skill {
                     });
                 })
                 .fully_open()
-                .then(|| { ui.separator() });
+                .then(|| ui.separator());
 
             ui.add_sized(
                 ui.available_size(),
@@ -502,14 +505,14 @@ impl Skill {
     }
 }
 
-#[derive(PartialEq, Clone, Copy, Savefile)]
+#[derive(PartialEq, Clone, Copy, Savefile, Debug)]
 enum Tab {
     Edit,
     Info,
     DragAndDrop,
     Metadata,
 }
-#[derive(PartialEq, Clone, Savefile)]
+#[derive(PartialEq, Clone, Savefile, Debug)]
 struct Routine {
     skills: [Skill; 10],
     name: String,
@@ -518,12 +521,185 @@ struct Routine {
     open: bool,
 }
 
+struct Video {
+    path: String,
+    open: bool,
+    ffmpeg_version: (String, String),
+    textures: Vec<(Texture2D, f32)>,
+    current_frame: usize,
+    show_video: bool,
+    kill: bool,
+    rect: [f32; 4],
+    timestamps: bool,
+    drag_one: usize,
+}
+
+impl Video {
+    fn load_textures(&mut self) -> Result<(), ffmpeg_sidecar::error::Error> {
+        // let mut textures = Vec::new();
+        match nfd2::open_file_dialog(None, None) {
+            Ok(Response::Okay(file_path)) => {
+                self.path = file_path.display().to_string();
+                println!("path: {}", self.path);
+            }
+            _ => {
+                println!("no file selected");
+            }
+        }
+
+        FfmpegCommand::new()
+            .duration("30")
+            .input(&self.path)
+            .hide_banner()
+            .filter("scale=\"160:-1\"")
+            .filter("fps=fps=24")
+            .args(["-vf","drawtext=fontsize=60:fontcolor=red:text='%{e\\:t}':x=(w-text_w):y=(h-text_h)"])
+            .args(["-f", "rawvideo", "-pix_fmt", "rgba", "-"])
+            // .rawvideo()
+            .spawn()?
+            .iter()?
+            .for_each(|event: FfmpegEvent| {
+                match event {
+                    FfmpegEvent::OutputFrame(frame) => {
+                        self.textures.push((
+                            Texture2D::from_rgba8(
+                                frame.width as u16,
+                                frame.height as u16,
+                                &frame.data
+                            ),
+                            frame.timestamp,
+                        ));
+                    }
+                    FfmpegEvent::Progress(progress) => {
+                        eprintln!("Current speed: {}x", progress.speed);
+                    }
+                    FfmpegEvent::Log(_level, msg) => {
+                        eprintln!("[ffmpeg] {}", msg);
+                    }
+                    _ => {}
+                }
+            });
+
+        println!("Finished {} frames", self.textures.len());
+        Ok(())
+    }
+
+    fn display(&mut self, egui_ctx: &egui::Context) {
+        egui::Window
+            ::new("Video")
+            .scroll2([true, true])
+            .min_height(match self.textures.get(self.current_frame) {
+                Some(a) => a.0.height() + 10.0,
+                _ => 0.0,
+            })
+            .show(egui_ctx, |ui| {
+                // Show the image:
+
+                ui.separator();
+                match self.textures.len() {
+                    0 => {
+                        self.show_video = false;
+                        if
+                            ui
+                                .add_sized(ui.available_size(), egui::Button::new("download file"))
+                                .clicked()
+                        {
+                            self.load_textures();
+                        }
+                    }
+                    _ => {
+                        if self.current_frame >= self.textures.len() {
+                            self.current_frame = 0;
+                        }
+                        let ratio =
+                            (self.textures[self.current_frame].0.height() as f32) /
+                            (self.textures[self.current_frame].0.width() as f32);
+                        let r = ui.add_sized(
+                            [ui.available_width(), ui.available_width() * ratio],
+                            egui::Label::new(format!("frame: {}", self.current_frame))
+                        ).rect;
+                        self.rect = [r.min.x, r.min.y, r.max.x, r.max.y];
+                        ui.add(
+                            egui::Slider
+                                ::new(&mut self.drag_one, 0..=self.textures.len() - 1)
+                                .clamp_to_range(true)
+                                .text("frame")
+                                .drag_value_speed(0.5)
+                        );
+
+                        let bar = ui.add(
+                            egui::ProgressBar::new(
+                                (self.current_frame as f32) / (self.textures.len() as f32)
+                            )
+                        );
+                        match bar.hover_pos() {
+                            Some(pos) => {
+                                self.current_frame = (
+                                    (((pos.x - bar.rect.left()) / bar.rect.width()) *
+                                        (self.textures.len() as f32)) as usize
+                                ).clamp(0, self.textures.len() - 1);
+                                if ui.input(|i| i.pointer.any_click()) {
+                                    self.drag_one = self.current_frame;
+                                }
+                            }
+                            _ => {
+                                self.current_frame = self.drag_one.clamp(
+                                    0,
+                                    self.textures.len() - 1
+                                );
+                            }
+                        }
+
+                        ui.separator();
+                        // number input
+                        ui.label(format!("Time: {}", self.textures[self.current_frame].1));
+                        ui.checkbox(&mut self.show_video, "Render Video");
+                    }
+                }
+                ui.separator();
+                ui.small_button("Close Window")
+                    .clicked()
+                    .then(|| {
+                        self.open = false;
+                    });
+                ui.small_button("Kill Window")
+                    .clicked()
+                    .then(|| {
+                        self.kill = true;
+                    });
+            });
+    }
+    fn new() -> Video {
+        Video {
+            path: String::from(""),
+            open: true,
+            ffmpeg_version: (
+                match ffmpeg_sidecar::download::check_latest_version() {
+                    Ok(version) => version,
+                    Err(a) => format!("{a:?}"),
+                },
+                match ffmpeg_sidecar::version::ffmpeg_version() {
+                    Ok(version) => version,
+                    Err(a) => format!("{a:?}"),
+                },
+            ),
+            textures: Vec::new(),
+            current_frame: 0,
+            show_video: true,
+            kill: false,
+            rect: [0.0, 0.0, 0.0, 0.0],
+            drag_one: 0,
+            timestamps: true,
+        }
+    }
+}
+
 impl Routine {
     fn display(&mut self, egui_ctx: &egui::Context) {
         egui::Window
             ::new(format!("Routine: {}", self.name))
             .id(Id::new(&self.id))
-            .scroll2([true,true])
+            .scroll2([true, true])
             .open(&mut self.open)
             .show(egui_ctx, |ui| {
                 let mut from = BodyPart::Feet;
@@ -629,7 +805,6 @@ impl Routine {
                     }
                     Tab::DragAndDrop => {
                         ui.label("Drag and Drop");
-
                     }
                     Tab::Metadata => {
                         ui.label(format!("Id: {}", self.id));
@@ -642,6 +817,7 @@ impl Routine {
                         ui.label(format!("Path: {root}/routines/{}.bin", self.id));
                     }
                 }
+                ui.add_sized(ui.available_size(), egui::Label::new(""))
             });
     }
     fn blank() -> Routine {
@@ -666,8 +842,94 @@ impl Routine {
     }
 }
 
+#[derive(Debug, Clone, EnumIter, Savefile, PartialEq, Eq, Copy)]
+enum WindowTheme {
+    Light,
+    Dark,
+    Latte,
+    Frappe,
+    Macchiato,
+    Mocha,
+}
+impl WindowTheme {
+    fn set_theme(&self, egui_ctx: &egui::Context) {
+        match self {
+            WindowTheme::Light => {
+                egui_ctx.set_visuals(egui::Visuals::light());
+            }
+            WindowTheme::Dark => {
+                egui_ctx.set_visuals(egui::Visuals::dark());
+            }
+            WindowTheme::Mocha => {
+                catppuccin_egui::set_theme(&egui_ctx, catppuccin_egui::MOCHA);
+            }
+            WindowTheme::Latte => {
+                catppuccin_egui::set_theme(&egui_ctx, catppuccin_egui::LATTE);
+            }
+            WindowTheme::Frappe => {
+                catppuccin_egui::set_theme(&egui_ctx, catppuccin_egui::FRAPPE);
+            }
+            WindowTheme::Macchiato => {
+                catppuccin_egui::set_theme(&egui_ctx, catppuccin_egui::MACCHIATO);
+            }
+        }
+    }
+
+    fn bg(&self) -> macroquad::color::Color {
+        match self {
+            WindowTheme::Light => macroquad::color::Color::new(0.9, 0.9, 0.9, 1.0),
+            WindowTheme::Dark => macroquad::color::Color::new(0.1, 0.1, 0.1, 1.0),
+            WindowTheme::Mocha => {
+                let r = catppuccin_egui::MOCHA.crust[0];
+                let g = catppuccin_egui::MOCHA.crust[1];
+                let b = catppuccin_egui::MOCHA.crust[2];
+                macroquad::color::Color::new(
+                    (r as f32) / 256.0,
+                    (g as f32) / 256.0,
+                    (b as f32) / 256.0,
+                    1.0
+                )
+            }
+            WindowTheme::Latte => {
+                let r = catppuccin_egui::LATTE.crust[0];
+                let g = catppuccin_egui::LATTE.crust[1];
+                let b = catppuccin_egui::LATTE.crust[2];
+                macroquad::color::Color::new(
+                    (r as f32) / 256.0,
+                    (g as f32) / 256.0,
+                    (b as f32) / 256.0,
+                    1.0
+                )
+            }
+            WindowTheme::Frappe => {
+                let r = catppuccin_egui::FRAPPE.crust[0];
+                let g = catppuccin_egui::FRAPPE.crust[1];
+                let b = catppuccin_egui::FRAPPE.crust[2];
+                macroquad::color::Color::new(
+                    (r as f32) / 256.0,
+                    (g as f32) / 256.0,
+                    (b as f32) / 256.0,
+                    1.0
+                )
+            }
+            WindowTheme::Macchiato => {
+                let r = catppuccin_egui::MACCHIATO.crust[0];
+                let g = catppuccin_egui::MACCHIATO.crust[1];
+                let b = catppuccin_egui::MACCHIATO.crust[2];
+                macroquad::color::Color::new(
+                    (r as f32) / 256.0,
+                    (g as f32) / 256.0,
+                    (b as f32) / 256.0,
+                    1.0
+                )
+            }
+        }
+    }
+}
+
 struct Data {
     routines: Vec<Routine>,
+    theme: WindowTheme,
 }
 
 impl Data {
@@ -681,28 +943,41 @@ impl Data {
         match fs::create_dir_all("./Data/routines") {
             Ok(_) => {}
             Err(e) => {
-                error!("Error creating directory: {}", e)
+                error!("Error creating directory: {}", e);
             }
-        };
+        }
         for i in &self.routines {
             match savefile::save_file(format!("Data/routines/{}.bin", i.id), 1, i) {
                 Ok(_) => {}
                 Err(e) => {
-                    error!("Error saving file: {}", e)
+                    error!("Error saving file: {}", e);
                 }
-            };
+            }
+        }
+        match savefile::save_file("Data/theme.bin", 1, &self.theme) {
+            Ok(_) => {}
+            Err(e) => { error!("Error saving file: {}", e) }
         }
     }
 
     fn load_files(&mut self) {
-        self.save();
-        for file in match fs::read_dir("./Data/routines") {
-        Ok(file) => file,
-        Err(e) => {
-            error!("Error reading directory: {}", e);
-            return;
+        match savefile::load_file("Data/theme.bin", 1) {
+            Ok(theme) => {
+                self.theme = theme;
+            }
+            Err(e) => {
+                error!("Error loading file: {}", e);
+            }
         }
-        } {
+        for file in (
+            match fs::read_dir("./Data/routines") {
+                Ok(file) => file,
+                Err(e) => {
+                    error!("Error reading directory: {}", e);
+                    return;
+                }
+            }
+        ) {
             self.routines.clear();
             let file = match file {
                 Ok(file) => file,
@@ -727,53 +1002,148 @@ impl Data {
                 }
             };
             self.routines.push(routine);
+        }
     }
+}
 
+#[derive(Debug, Clone, Savefile)]
+enum Panel {
+    Routine,
+    TOF,
+    Execution,
+    Deductions,
+}
+
+impl Default for Panel {
+    fn default() -> Self {
+        Panel::Routine
     }
+}
+
+fn none_routine() -> Option<Routine> {
+    None
+}
+
+#[derive(Debug, Clone, Savefile)]
+struct RecordedRoutine {
+    #[savefile_default_fn = "none_routine"]
+    #[savefile_ignore]
+    routine: Option<Routine>,
+    #[savefile_ignore]
+    panel: Panel,
+    routine_id: String,
 }
 
 #[macroquad::main("Trampoline thing")]
 async fn main() {
-
-    egui_macroquad::ui(|egui_ctx| {
-        egui_ctx.set_visuals(egui::Visuals::light());
-    });
+    let mut now = Instant::now();
     // get text input from user
     let mut data = Data {
         routines: vec![],
+        theme: WindowTheme::Light,
     };
+
+    // let mut
+
+    ffmpeg_sidecar::download::auto_download().unwrap();
+
     data.load_files();
+    egui_macroquad::ui(|egui_ctx| {
+        data.theme.set_theme(egui_ctx);
+    });
+
+    let mut videos: Vec<Video> = vec![];
+
     loop {
-        clear_background(WHITE);
+        if now.elapsed().as_millis() > 1000 {
+            data.save();
+            now = Instant::now();
+        }
+
+        clear_background(data.theme.bg());
         // Process keys, mouse etc.
         egui_macroquad::ui(|egui_ctx| {
+            data.theme.set_theme(egui_ctx);
+
             egui::SidePanel::left("Left").show(egui_ctx, |ui| {
                 ui.heading("Routines");
                 ui.separator();
                 ui.button("New Routine")
-                        .clicked()
-                        .then(|| {
-                            data.routines.push(Routine::blank());
-                });
+                    .clicked()
+                    .then(|| {
+                        data.routines.push(Routine::blank());
+                    });
                 ui.menu_button("edit routine", |ui| {
                     for r in data.routines.iter_mut() {
                         let toggle = !r.open;
                         ui.selectable_value(&mut r.open, toggle, &r.name);
                     }
                 });
+                ui.heading("Video");
+                ui.separator();
+                ui.button("load video")
+                    .clicked()
+                    .then(|| {
+                        videos.push(Video::new());
+                    });
+                ui.menu_button("reopen video", |ui| {
+                    for r in videos.iter_mut() {
+                        let toggle = !r.open;
+                        ui.selectable_value(&mut r.open, toggle, &r.path);
+                    }
+                });
+                ui.button("Update/download ffmpeg")
+                    .clicked()
+                    .then(|| {
+                        ffmpeg_sidecar::download::auto_download().unwrap();
+                    });
                 ui.heading("Files");
                 ui.separator();
-                ui.button("Save").clicked().then(|| {
-                    data.save();
-                });
-
-                
+                ui.button("Save")
+                    .clicked()
+                    .then(|| {
+                        data.save();
+                    });
+                ui.heading("Settings");
+                ui.separator();
+                ui.menu_button("UI Style", |ui| {
+                    for s in WindowTheme::iter() {
+                        ui.selectable_value(&mut data.theme, s, &format!("{:?}", s));
+                    }
+                })
+                    .response.clicked()
+                    .then(|| {
+                        data.theme.set_theme(egui_ctx);
+                    });
             });
-            
+            for i in videos.iter_mut() {
+                if i.open {
+                    i.display(egui_ctx);
+                    if i.kill {
+                        for t in i.textures.iter_mut() {
+                            t.0.delete();
+                        }
+                        i.textures.clear();
+                    }
+                }
+            }
             data.render(&egui_ctx);
         });
 
+        videos.retain(|x| !x.kill);
+
         egui_macroquad::draw();
+        for v in &videos {
+            if v.show_video && v.open {
+                let index = clamp(v.current_frame, 0, v.textures.len() - 1);
+                let frame = &v.textures[index];
+                draw_texture_ex(frame.0, v.rect[0], v.rect[1], WHITE, DrawTextureParams {
+                    dest_size: Some(vec2(v.rect[2] - v.rect[0], v.rect[3] - v.rect[1])),
+                    ..Default::default()
+                });
+            }
+        }
+
         next_frame().await;
     }
 }

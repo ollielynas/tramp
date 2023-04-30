@@ -17,9 +17,14 @@ use strum_macros::EnumIter;
 use chrono::{ DateTime, Utc };
 
 use ffmpeg_sidecar::{ self, command::FfmpegCommand, event::FfmpegEvent };
-
+extern crate clipboard;
+use clipboard::ClipboardProvider;
+use clipboard::ClipboardContext;
 mod skill;
 use skill::*;
+
+mod video;
+use video::*;
 
 
 #[derive(PartialEq, Clone, Copy, Savefile, Debug)]
@@ -38,167 +43,6 @@ struct Routine {
     #[savefile_default_fn = "false_func"]
     #[savefile_ignore]
     open:bool,
-}
-
-struct Video {
-    path: String,
-    open: bool,
-    textures: Vec<(Texture2D, f32)>,
-    current_frame: usize,
-    show_video: bool,
-    kill: bool,
-    rect: [f32; 4],
-    timestamps: bool,
-    drag_one: usize,
-}
-
-impl Video {
-    fn load_textures(&mut self) -> Result<(), ffmpeg_sidecar::error::Error> {
-        // let mut textures = Vec::new();
-        match nfd2::open_file_dialog(None, None) {
-            Ok(Response::Okay(file_path)) => {
-                self.path = file_path.display().to_string();
-                println!("path: {}", self.path);
-            }
-            _ => {
-                println!("no file selected");
-            }
-        }
-
-        FfmpegCommand::new()
-            .duration("30")
-            .input(&self.path)
-            .hide_banner()
-            .filter("fps=fps=24")
-            .args(match self.timestamps {true => ["-vf","scale=720:-1, drawtext=fontsize=50:fontcolor=GreenYellow:text='%{e\\:t}':x=(w-text_w):y=(h-text_h)"], false => ["",""]})
-            .args(["-f", "rawvideo", "-pix_fmt", "rgba", "-"])
-            // .rawvideo()
-            .spawn()?
-            .iter()?
-            .for_each(|event: FfmpegEvent| {
-                match event {
-                    FfmpegEvent::OutputFrame(frame) => {
-                        self.textures.push((
-                            Texture2D::from_rgba8(
-                                frame.width as u16,
-                                frame.height as u16,
-                                &frame.data
-                            ),
-                            frame.timestamp,
-                        ));
-                    }
-                    FfmpegEvent::Progress(progress) => {
-                        eprintln!("Current speed: {}x", progress.speed);
-                    }
-                    FfmpegEvent::Log(_level, msg) => {
-                        eprintln!("[ffmpeg] {}", msg);
-                    }
-                    _ => {}
-                }
-            });
-
-        println!("Finished {} frames", self.textures.len());
-        Ok(())
-    }
-
-    fn display(&mut self, egui_ctx: &egui::Context) {
-        egui::Window
-            ::new("Video")
-            .scroll2([true, false])
-            .min_height(match self.textures.get(self.current_frame) {
-                Some(a) => a.0.height() + 10.0,
-                _ => 0.0,
-            })
-            .show(egui_ctx, |ui| {
-                // Show the image:
-
-                ui.separator();
-                match self.textures.len() {
-                    0 => {
-                        self.show_video = false;
-                        if
-                            ui
-                                .add_sized([ui.available_width(), ui.available_width()*0.65], egui::Button::new("download file"))
-                                .clicked()
-                        {
-                            self.load_textures();
-                        }
-                    }
-                    _ => {
-                        if self.current_frame >= self.textures.len() {
-                            self.current_frame = 0;
-                        }
-                        let ratio =
-                            (self.textures[self.current_frame].0.height() as f32) /
-                            (self.textures[self.current_frame].0.width() as f32);
-                        let r = ui.add_sized(
-                            [ui.available_width(), ui.available_width() * ratio],
-                            egui::Label::new(format!("frame: {}", self.current_frame))
-                        ).rect;
-                        self.rect = [r.min.x, r.min.y, r.max.x, r.max.y];
-                        ui.add(
-                            egui::Slider
-                                ::new(&mut self.drag_one, 0..=self.textures.len() - 1)
-                                .clamp_to_range(true)
-                                .text("frame")
-                                .drag_value_speed(0.5)
-                        );
-
-                        let bar = ui.add(
-                            egui::ProgressBar::new(
-                                (self.current_frame as f32) / (self.textures.len() as f32)
-                            )
-                        );
-                        match bar.hover_pos() {
-                            Some(pos) => {
-                                self.current_frame = (
-                                    (((pos.x - bar.rect.left()) / bar.rect.width()) *
-                                        (self.textures.len() as f32)) as usize
-                                ).clamp(0, self.textures.len() - 1);
-                                if ui.input(|i| i.pointer.any_click()) {
-                                    self.drag_one = self.current_frame;
-                                }
-                            }
-                            _ => {
-                                self.current_frame = self.drag_one.clamp(
-                                    0,
-                                    self.textures.len() - 1
-                                );
-                            }
-                        }
-
-                        ui.separator();
-                        // number input
-                        ui.label(format!("Time: {}", self.textures[self.current_frame].1));
-                        ui.checkbox(&mut self.show_video, "Render Video");
-                    }
-                }
-                ui.separator();
-                ui.small_button("Close Window")
-                    .clicked()
-                    .then(|| {
-                        self.open = false;
-                    });
-                ui.small_button("Kill Window")
-                    .clicked()
-                    .then(|| {
-                        self.kill = true;
-                    });
-            });
-    }
-    fn new() -> Video {
-        Video {
-            path: String::from(""),
-            open: true,
-            textures: Vec::new(),
-            current_frame: 0,
-            show_video: true,
-            kill: false,
-            rect: [0.0, 0.0, 0.0, 0.0],
-            drag_one: 0,
-            timestamps: true,
-        }
-    }
 }
 
 impl Routine {
@@ -628,8 +472,6 @@ impl Judged {
             .id(Id::new(&self.id)).show(egui_ctx, |ui| {
             egui::ScrollArea::horizontal().show(ui, |ui| {
 
-            
-
             if self.routine.is_none() {
                 match savefile::load_file(format!("Data/routines/{}.bin", self.routine_id), 1) {
                     Ok(routine) => {
@@ -778,21 +620,17 @@ impl Judged {
                         for i in 0..10 {
                         total += self.hd[i];
                     }
+                    total = (total*10.0);
                     ui.label(format!("Total HD: -{}" ,total));
                     for i in 0..10 {
                         ui.label(format!("{}.) {}",i,self.routine.as_ref().unwrap().skills[i].name()));
                         ui.horizontal(|ui| {
-                                ui.selectable_label(self.execution_1[i] == 0.0, "0.0").clicked().then(|| {self.hd[i] = 0.0});
-                                ui.separator();
-                                ui.selectable_label(self.execution_1[i] == 0.1, "0.1").clicked().then(|| {self.hd[i] = 0.1});
-                                ui.separator();
-                                ui.selectable_label(self.execution_1[i] == 0.2, "0.2").clicked().then(|| {self.hd[i] = 0.2});
-                                ui.separator();
-                                ui.selectable_label(self.execution_1[i] == 0.3, "0.3").clicked().then(|| {self.hd[i] = 0.3});
-                                ui.separator();
-                                ui.selectable_label(self.execution_1[i] == 0.4, "0.4").clicked().then(|| {self.hd[i] = 0.4});
-                                ui.separator();
-                                ui.selectable_label(self.execution_1[i] == 0.5, "0.5").clicked().then(|| {self.hd[i] = 0.5});
+                                ui.selectable_label(self.execution_1[i] == 0.0, "0.0").clicked().then(|| {self.execution_1[i] = 0.0});
+                                ui.selectable_label(self.execution_1[i] == 0.1, "0.1").clicked().then(|| {self.execution_1[i] = 0.1});
+                                ui.selectable_label(self.execution_1[i] == 0.2, "0.2").clicked().then(|| {self.execution_1[i] = 0.2});
+                                ui.selectable_label(self.execution_1[i] == 0.3, "0.3").clicked().then(|| {self.execution_1[i] = 0.3});
+                                ui.selectable_label(self.execution_1[i] == 0.4, "0.4").clicked().then(|| {self.execution_1[i] = 0.4});
+                                ui.selectable_label(self.execution_1[i] == 0.5, "0.5").clicked().then(|| {self.execution_1[i] = 0.5});
                         });
                     }
                 }
@@ -849,6 +687,7 @@ async fn main() {
             data.theme.set_theme(egui_ctx);
 
             egui::SidePanel::left("Left").show(egui_ctx, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.heading("Routines");
                 ui.separator();
                 ui.button("New Routine")
@@ -952,7 +791,7 @@ async fn main() {
             }
             data.render(&egui_ctx);
         });
-
+        });
         videos.retain(|x| !x.kill);
 
         egui_macroquad::draw();

@@ -14,496 +14,13 @@ use std::env;
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
 
+use chrono::{ DateTime, Utc };
+
 use ffmpeg_sidecar::{ self, command::FfmpegCommand, event::FfmpegEvent };
 
-#[derive(PartialEq, Eq, Hash, Clone, Copy, Savefile, Debug)]
-enum Shape {
-    Straight,
-    Pike,
-    Tuck,
-}
+mod skill;
+use skill::*;
 
-#[derive(PartialEq, Eq, Hash, Clone, Copy, Savefile, Debug)]
-enum BodyPart {
-    Feet,
-    Front,
-    Back,
-    Head,
-    Seat,
-}
-#[derive(PartialEq, Eq, Hash, Clone, Copy, Savefile, Debug)]
-enum FlipDirection {
-    Forward,
-    Backward,
-}
-
-impl BodyPart {
-    fn name(&self) -> String {
-        (
-            match self {
-                BodyPart::Feet => "feet",
-                BodyPart::Front => "front",
-                BodyPart::Back => "back",
-                BodyPart::Head => "head",
-                BodyPart::Seat => "seat",
-            }
-        ).to_owned()
-    }
-    fn add(&self, amount: f32, direction: FlipDirection, total_twist: f32) -> BodyPart {
-        let direction = match (direction, (total_twist.fract() * 10.0) as i32) {
-            (FlipDirection::Forward, 0) => FlipDirection::Forward,
-            (FlipDirection::Forward, 5) => FlipDirection::Backward,
-            (FlipDirection::Backward, 0) => FlipDirection::Backward,
-            (FlipDirection::Backward, 5) => FlipDirection::Forward,
-            _ => FlipDirection::Forward,
-        };
-        if amount == 0.0 {
-            self.clone()
-        } else if amount == 0.5 {
-            match &self {
-                BodyPart::Back => BodyPart::Front,
-                BodyPart::Front => BodyPart::Back,
-                BodyPart::Head => BodyPart::Feet,
-                BodyPart::Feet => BodyPart::Head,
-                BodyPart::Seat => BodyPart::Head,
-            }
-        } else if amount == 0.25 {
-            match &self {
-                BodyPart::Back | BodyPart::Front => BodyPart::Feet,
-                BodyPart::Feet if direction == FlipDirection::Forward => BodyPart::Front,
-                BodyPart::Feet if direction == FlipDirection::Backward => BodyPart::Back,
-                BodyPart::Head if direction == FlipDirection::Forward => BodyPart::Back,
-                BodyPart::Head if direction == FlipDirection::Backward => BodyPart::Front,
-                BodyPart::Seat if direction == FlipDirection::Forward => BodyPart::Back,
-                BodyPart::Seat if direction == FlipDirection::Backward => BodyPart::Front,
-                _ => BodyPart::Feet,
-            }
-        } else {
-            match &self {
-                BodyPart::Back | BodyPart::Front => BodyPart::Feet,
-                BodyPart::Feet if direction == FlipDirection::Forward => BodyPart::Back,
-                BodyPart::Feet if direction == FlipDirection::Backward => BodyPart::Front,
-                BodyPart::Seat if direction == FlipDirection::Forward => BodyPart::Back,
-                BodyPart::Seat if direction == FlipDirection::Backward => BodyPart::Front,
-                BodyPart::Head if direction == FlipDirection::Forward => BodyPart::Front,
-                BodyPart::Head if direction == FlipDirection::Backward => BodyPart::Back,
-                _ => BodyPart::Feet,
-            }
-        }
-    }
-}
-
-#[derive(PartialEq, Clone, Savefile, Debug)]
-struct Skill {
-    flip: f32,
-    from: BodyPart,
-    to: BodyPart,
-    twist: Vec<f32>,
-    shape: Shape,
-    direction: FlipDirection,
-    edit_text: String,
-}
-
-fn fraction(num: f32) -> String {
-    if num == 0.5 {
-        return "half".to_owned();
-    } else if num == 0.25 {
-        return "quarter".to_owned();
-    } else if num == 1.0 {
-        return "full".to_owned();
-    } else {
-        let str = num
-            .to_string()
-            .replace(".5", " 1/2")
-            .replace(".25", " 1/4")
-            .replace(".75", " 3/4");
-        if num - num.fract() < 0.0 {
-            let str = str.replace("0", "");
-        }
-        return str;
-    }
-}
-
-fn no_icon(ui: &mut egui::Ui, openness: f32, response: &egui::Response) {}
-
-impl Skill {
-    /// todo
-
-    fn name(&self) -> String {
-        if let Some(name) = SKILLS.get(&self.notation()) {
-            return name.to_owned().to_owned();
-        }
-
-        let mut name: String = match self.flip.to_string().as_str() {
-            "1" => "Single, ".to_owned(),
-            "2" => "Double, ".to_owned(),
-            "3" => "Triple, ".to_owned(),
-            "4" => "Quad, ".to_owned(),
-            _ => format!("{} flip, ", fraction(self.flip)),
-        };
-        name += match self.direction {
-            FlipDirection::Forward => "Forward, ",
-            FlipDirection::Backward => "Backward, ",
-        };
-
-        if self.twist.len() > 1 {
-            name += format!(
-                " {} {} {}",
-                match self.twist[0].ceil() as i32 {
-                    0 => "".to_owned(),
-                    _ => format!("{} in,", fraction(self.twist[0])),
-                },
-                self.twist
-                    .iter()
-                    .skip(1)
-                    .filter(|x| **x != 0.0)
-                    .enumerate()
-                    .map(|(i, x)| { fraction(*x) })
-                    .collect::<Vec<String>>()
-                    .join(" twist,"),
-                match self.twist.last() {
-                    Some(a) if a.ceil() != 0.0 => "",
-                    _ => "out",
-                }
-            ).as_str();
-        }
-        if self.twist.len() == 1 {
-            name += (
-                match self.twist[0] {
-                    0.0 => "".to_owned(),
-                    _ => format!(" {} twist", fraction(self.twist[0])),
-                }
-            ).as_str();
-        }
-        if self.flip.fract() != 0.0 || self.from != BodyPart::Feet || self.to == BodyPart::Seat {
-            name += format!(", from {} to {}", self.from.name(), self.to.name()).as_str();
-        }
-        name = name.to_owned();
-
-        name += match self.shape {
-            _ if self.flip == 0.0 => "",
-            Shape::Straight => " (Straight)",
-            Shape::Pike => " (Pike)",
-            Shape::Tuck => " (Tuck)",
-        };
-        return name;
-    }
-
-    fn notation(&self) -> String {
-        ((self.flip * 4.0) as u32).to_string() +
-            &self.twist
-                .iter()
-                .map(|x| (x * 2.0) as u32)
-                .map(|x| x.to_string())
-                .collect::<Vec<String>>()
-                .join("") +
-            &(match self.shape {
-                Shape::Straight => " /",
-                Shape::Pike => " <",
-                Shape::Tuck => " o",
-            }) +
-            (match self.direction {
-                FlipDirection::Forward => " f",
-                FlipDirection::Backward => "",
-            }) +
-            (match self.to {
-                BodyPart::Seat => " -1",
-                _ => "",
-            })
-    }
-    fn diff(&self) -> f32 {
-        let mut diff = 0.0;
-
-        // +1.0 for each 1/4 flip, plus 0.1 for each 1/2 twist
-        diff += self.flip * 0.4;
-        diff += self.twist.iter().sum::<f32>() * 0.2;
-
-        // +0.1 for each completed 360 somersault (bonus)
-        diff += self.flip.floor() * 0.1;
-
-        match self.shape {
-            Shape::Straight | Shape::Pike => {
-                if self.twist.iter().sum::<f32>() == 0.0 && self.flip >= 1.0 {
-                    diff += 0.1;
-                }
-                if self.flip >= 2.0 {
-                    diff += self.flip.floor() * 0.1;
-                }
-                if self.flip >= 3.0 {
-                    diff += (self.flip - 3.0).floor() * 0.1;
-                }
-            }
-            Shape::Tuck => {}
-        }
-        return (diff * 100.0).round() / 100.0;
-    }
-    fn from_notation(notation: String, from: BodyPart) -> Option<Skill> {
-        let mut num_flips = 0;
-        let shape = match (notation.contains("o"), notation.contains("<"), notation.contains("/")) {
-            (true, false, false) => Shape::Tuck,
-            (false, true, false) => Shape::Pike,
-            (false, false, true) => Shape::Straight,
-            _ => {
-                return None;
-            }
-        };
-
-        let forwards = notation.contains("f");
-        let to_seat = notation.contains("-1");
-
-        let notation = notation
-            .replace("-1", "")
-            .chars()
-            .filter(|x| x.is_ascii_digit())
-            .collect::<String>();
-
-        let mut current_text = "".to_owned();
-        for (i, c) in notation.chars().enumerate() {
-            current_text.push(c);
-            let potential_number_of_flips = current_text.parse::<i32>().unwrap_or(0);
-            let remaining_chars = notation.len() - i;
-
-            if
-                potential_number_of_flips >
-                (match (remaining_chars * 4).try_into() {
-                    Ok(a) => a,
-                    Err(e) => -1,
-                })
-            {
-                break;
-            }
-
-            num_flips = potential_number_of_flips;
-        }
-        // if num_flips != (notation.length() - num_flips.to_string().length())/4.0 {
-        //         println!("{} {} {}", potential_number_of_flips, remaining_chars, notation.len());
-        //         return None;
-        // }
-
-        if notation.len() == 1 {
-            num_flips = 0;
-            current_text = "".to_owned();
-        }
-
-        let twist = notation
-            .chars()
-            .skip(current_text.len().max(1) - 1)
-            .map(|x| (x.to_digit(10).unwrap() as f32) / 2.0)
-            .collect::<Vec<f32>>();
-
-        return Some(Skill {
-            to: match to_seat {
-                true => BodyPart::Seat,
-                false =>
-                    from.add(
-                        ((num_flips as f32) / 4.0).fract(),
-                        match forwards {
-                            true => FlipDirection::Forward,
-                            false => FlipDirection::Backward,
-                        },
-                        twist.iter().sum()
-                    ),
-            },
-            direction: match forwards {
-                true => FlipDirection::Forward,
-                false => FlipDirection::Backward,
-            },
-            flip: (num_flips as f32) / 4.0,
-            twist,
-            from,
-            edit_text: notation +
-            (match &shape {
-                Shape::Straight => " /",
-                Shape::Pike => " <",
-                Shape::Tuck => " o",
-            }),
-            shape,
-        });
-    }
-
-    fn display(
-        &mut self,
-        egui_ctx: &egui::Context,
-        ui: &mut egui::Ui,
-        from: BodyPart,
-        id: String
-    ) -> BodyPart {
-        let mut changed = false;
-        ui.horizontal(|ui| {
-            egui::CollapsingHeader
-                ::new(self.name())
-                .id_source(id)
-                .icon(no_icon)
-                .show(ui, |ui| {
-                    ui.label("Notation                  ");
-                    ui.shrink_width_to_current();
-                    ui.horizontal(|ui| {
-                        ui.text_edit_singleline(&mut self.edit_text);
-                        let mut valid = false;
-                        if let Some(skill) = Skill::from_notation(self.edit_text.clone(), from) {
-                            valid = true;
-                            self.flip = skill.flip;
-                            self.twist = skill.twist;
-                            self.shape = skill.shape;
-                            self.from = skill.from;
-                            self.to = skill.to;
-                            self.direction = skill.direction;
-                        }
-                        ui.checkbox(&mut valid, "valid").surrender_focus();
-                        ui.add_space(10.0);
-                        ui.hyperlink_to("FIG", "https://usagym.org/PDFs/Forms/T%26T/DD_TR.pdf")
-                    });
-                    ui.separator();
-                    ui.label("Flip");
-                    ui.horizontal(|ui| {
-                        if self.flip >= 0.25 {
-                            ui.small_button("-0.25")
-                                .clicked()
-                                .then(|| {
-                                    self.flip -= 0.25;
-                                    changed = true;
-                                });
-                        } else {
-                            ui.label("-0.25");
-                        }
-                        if self.flip >= 1.0 {
-                            ui.small_button("-1.0")
-                                .clicked()
-                                .then(|| {
-                                    self.flip -= 1.0;
-                                    changed = true;
-                                });
-                        } else {
-                            ui.label("-1.0");
-                        }
-                        ui.selectable_label(true, format!("{:.2}", self.flip)).on_hover_text(
-                            "Number of flips"
-                        );
-                        if self.flip <= 9.0 {
-                            ui.small_button("+1.0")
-                                .clicked()
-                                .then(|| {
-                                    self.flip += 1.0;
-                                    changed = true;
-                                });
-                        } else {
-                            ui.label("+1.0");
-                        }
-                        if self.flip <= 9.75 {
-                            ui.small_button("+0.25")
-                                .clicked()
-                                .then(|| {
-                                    self.flip += 0.25;
-                                    changed = true;
-                                });
-                        } else {
-                            ui.label("+0.25");
-                        }
-                    });
-                    while self.twist.len() > (self.flip.ceil() as usize) {
-                        self.twist.pop();
-                    }
-                    for i in 0..self.flip.ceil() as usize {
-                        if self.twist.len() <= i {
-                            self.twist.push(0.0);
-                        }
-                        ui.horizontal(|ui| {
-                            ui.label(format!("{}.)", i + 1)).on_hover_text(
-                                format!("Twists for flip {}", i + 1)
-                            );
-                            if self.flip >= 0.25 {
-                                ui.small_button("-0.5")
-                                    .clicked()
-                                    .then(|| {
-                                        self.twist[i] -= 0.5;
-                                        changed = true;
-                                    });
-                            } else {
-                                ui.label("-0.5");
-                            }
-                            ui.selectable_label(
-                                true,
-                                format!("{:.1}", self.twist[i])
-                            ).on_hover_text(format!("number of twists in flip no. {}", i + 1));
-                            if self.flip <= 9.75 {
-                                ui.small_button("+0.5")
-                                    .clicked()
-                                    .then(|| {
-                                        self.twist[i] += 0.5;
-                                        changed = true;
-                                    });
-                            } else {
-                                ui.label("+0.5");
-                            }
-                        });
-                    }
-
-                    ui.horizontal(|ui| {
-                        ui.radio_value(&mut self.shape, Shape::Tuck, "tuck")
-                            .changed()
-                            .then(|| {
-                                changed = true;
-                            });
-                        ui.radio_value(&mut self.shape, Shape::Pike, "pike")
-                            .changed()
-                            .then(|| {
-                                changed = true;
-                            });
-                        ui.radio_value(&mut self.shape, Shape::Straight, "straight")
-                            .changed()
-                            .then(|| {
-                                changed = true;
-                            });
-                    });
-                    ui.horizontal(|ui| {
-                        ui.radio_value(&mut self.direction, FlipDirection::Forward, "forward")
-                            .changed()
-                            .then(|| {
-                                changed = true;
-                            });
-                        ui.radio_value(&mut self.direction, FlipDirection::Backward, "backward")
-                            .changed()
-                            .then(|| {
-                                changed = true;
-                            });
-                    });
-                    ui.horizontal(|ui| {
-                        let new_body = match self.to {
-                            BodyPart::Seat => BodyPart::Feet,
-                            BodyPart::Back => BodyPart::Back,
-                            BodyPart::Feet => BodyPart::Feet,
-                            BodyPart::Front => BodyPart::Front,
-                            BodyPart::Head => BodyPart::Head,
-                        };
-                        ui.radio_value(&mut self.to, BodyPart::Seat, "To Seat")
-                            .changed()
-                            .then(|| {
-                                changed = true;
-                            });
-                        ui.radio_value(&mut self.to, new_body, format!("To {}", new_body.name()))
-                            .changed()
-                            .then(|| {
-                                changed = true;
-                            });
-                    });
-                })
-                .fully_open()
-                .then(|| ui.separator());
-
-            ui.add_sized(
-                ui.available_size(),
-                egui::Label::new(format!("Diff: {}", self.diff()))
-            ).on_hover_ui(|ui| {
-                ui.label("Difficulty");
-                ui.hyperlink("https://usagym.org/PDFs/Forms/T%26T/DD_TR.pdf");
-            });
-        });
-        if changed {
-            self.edit_text = self.notation();
-        }
-        return self.to;
-    }
-}
 
 #[derive(PartialEq, Clone, Copy, Savefile, Debug)]
 enum Tab {
@@ -526,7 +43,6 @@ struct Routine {
 struct Video {
     path: String,
     open: bool,
-    ffmpeg_version: (String, String),
     textures: Vec<(Texture2D, f32)>,
     current_frame: usize,
     show_video: bool,
@@ -674,16 +190,6 @@ impl Video {
         Video {
             path: String::from(""),
             open: true,
-            ffmpeg_version: (
-                match ffmpeg_sidecar::download::check_latest_version() {
-                    Ok(version) => version,
-                    Err(a) => format!("{a:?}"),
-                },
-                match ffmpeg_sidecar::version::ffmpeg_version() {
-                    Ok(version) => version,
-                    Err(a) => format!("{a:?}"),
-                },
-            ),
             textures: Vec::new(),
             current_frame: 0,
             show_video: true,
@@ -837,7 +343,7 @@ impl Routine {
             ],
             name: "New Routine".to_owned(),
             current_tab: Tab::Edit,
-            id: UNIX_EPOCH.elapsed().unwrap().as_secs().to_string(),
+            id: UNIX_EPOCH.elapsed().unwrap().as_secs_f32().to_string().replace(".", ""),
             open: true,
         }
     }
@@ -1003,14 +509,8 @@ impl Data {
                 error!("Error loading file: {}", e);
             }
         }
-        for file in match fs::read_dir("./Data/routines") {
-                Ok(file) => file,
-                Err(e) => {
-                    error!("Error reading directory: {}", e);
-                    return;
-                }
-            } {
-            self.routines.clear();
+        self.routines.clear();
+        for file in match fs::read_dir("./Data/routines") {Ok(file) => file,Err(e) => {println!("{e}");return}} {
             let file = match file {
                 Ok(file) => file,
                 Err(e) => {
@@ -1026,14 +526,38 @@ impl Data {
                     return;
                 }
             };
-            let routine: Routine = match savefile::load_file(path, 1) {
-                Ok(routine) => routine,
+            match savefile::load_file(path, 1) {
+                Ok(routine) => self.routines.push(routine),
                 Err(e) => {
                     error!("Error loading file: {}", e);
                     return;
                 }
             };
-            self.routines.push(routine);
+        }
+        self.judged.clear();
+        for file in match fs::read_dir("./Data/judge") {Ok(file) => file,Err(e) => {println!("{e}");return}} {
+            let file = match file {
+                Ok(file) => file,
+                Err(e) => {
+                    error!("Error reading file: {}", e);
+                    return;
+                }
+            };
+            let path = file.path();
+            let path = match path.to_str() {
+                Some(path) => path,
+                None => {
+                    error!("Error reading path");
+                    return;
+                }
+            };
+            match savefile::load_file(path, 1) {
+                Ok(routine) => self.judged.push(routine),
+                Err(e) => {
+                    error!("Error loading file: {}", e);
+                    return;
+                }
+            };
         }
     }
 }
@@ -1076,6 +600,7 @@ struct Judged {
     execution_1: [f32;10],
     execution_5: [[f32;10];5],
     five_juges: bool,
+    date_of_creation: String,
     hd: [f32;10],
     id: String,
 
@@ -1091,14 +616,14 @@ impl Judged {
             execution_5: [[0.0;10];5],
             five_juges: false,
             hd: [0.0;10],
-            id: UNIX_EPOCH.elapsed().unwrap().as_secs().to_string(),
+            id: UNIX_EPOCH.elapsed().unwrap().as_secs_f32().to_string().replace(".", ""),
             open: true,
+            date_of_creation: chrono::Local::now().format("%Y-%m-%d %H:%M").to_string(),
         }
     }
 
     fn display(&mut self, egui_ctx:&egui::Context) {
-egui::Window
-            ::new(format!("Judged Routine: {}", self.id))
+        egui::Window::new(format!("Judged Routine: {}", self.id))
             .open(&mut self.open)
             .id(Id::new(&self.id)).show(egui_ctx, |ui| {
             egui::ScrollArea::horizontal().show(ui, |ui| {
@@ -1115,7 +640,7 @@ egui::Window
                     }
                 }
             }
-            
+            egui::ScrollArea::horizontal().show(ui, |ui| {
             ui.horizontal(|ui| {
                     if self.panel == Panel::Routine {
                         ui.label("Routine");
@@ -1188,20 +713,32 @@ egui::Window
                     }
                     
                 });
+            });
             ui.separator();
 
             match &self.panel {
                 &Panel::Routine => {
+                    ui.small_button("reload").clicked().then(||{
+                        match savefile::load_file(format!("Data/routines/{}.bin", self.routine_id), 1) {
+                    Ok(routine) => {
+                        self.routine = Some(routine);
+                    }
+                    Err(e) => {
+                        error!("Error loading file: {}", e);
+                    }
+                }
+                        
+                    });
                         for i in 0..10 {
-                        ui.label(format!("{}.) {}",i,self.routine.as_ref().unwrap().skills[i].name()));
+                        ui.label(format!("{}.) {}",i+1,self.routine.as_ref().unwrap().skills[i].name()));
                     }
                     
                 }
                 &Panel::Diff => {
-                    ui.label(format!("TotalDifficulty: +{}" ,(0..10).map(|i|(self.routine.as_ref().unwrap().skills[i].diff()*100.0)as i32).sum::<i32>()as f32 /100.0));
+                    ui.label(format!("Total Difficulty: +{}" ,(0..10).map(|i|(self.routine.as_ref().unwrap().skills[i].diff()*100.0)as i32).sum::<i32>()as f32 /100.0));
                     ui.separator();
                     for i in 0..10 {
-                    ui.label(format!("{}.) {}",i,self.routine.as_ref().unwrap().skills[i].diff()));
+                    ui.label(format!("{}.) {}",i+1,self.routine.as_ref().unwrap().skills[i].diff()));
                     }
 
                 }
@@ -1210,14 +747,14 @@ egui::Window
                     for i in 0..10 {
                         total += self.hd[i];
                     }
-                    ui.label(format!("Total HD: -{}" ,total));
+                    ui.heading(format!("Total HD: -{}" ,total));
                     for i in 0..10 {
                         ui.label(format!("{}.) {}",i,self.routine.as_ref().unwrap().skills[i].name()));
                         ui.horizontal(|ui| {
-                            ui.radio_value(&mut self.hd[i], 0.0, "0.0");
-                            ui.radio_value(&mut self.hd[i], 0.1, "0.1");
-                            ui.radio_value(&mut self.hd[i], 0.2, "0.2");
-                            ui.radio_value(&mut self.hd[i], 0.3, "0.3");
+                            ui.selectable_label(self.hd[i] == 0.0, "0.0").clicked().then(|| {self.hd[i] = 0.0});
+                            ui.selectable_label(self.hd[i] == 0.1, "0.1").clicked().then(|| {self.hd[i] = 0.1});
+                            ui.selectable_label(self.hd[i] == 0.2, "0.2").clicked().then(|| {self.hd[i] = 0.2});
+                            ui.selectable_label(self.hd[i] == 0.3, "0.3").clicked().then(|| {self.hd[i] = 0.3});
                         });
                     }
                 }
@@ -1225,12 +762,17 @@ egui::Window
                     ui.label(format!("Execution: -{}", match self.five_juges {
                         false => {self.execution_1.iter().sum::<f32>()},
                         true => {
-                            let totals = self.execution_5.iter().map(|x| x.iter().sum::<f32>());
-                            totals.max()
+                            let mut totals = self.execution_5.iter().map(|x| x.iter().sum::<f32>()).collect::<Vec<f32>>();
+                            totals.sort_by(|a,b| a.partial_cmp(b).unwrap());
+                            totals[1..4].iter().sum::<f32>()
                         }
                     }));
                     if self.five_juges {
-
+                        for i in 0..10 {
+                        ui.selectable_label(self.execution_1[i] == 0.0, "0.0").clicked().then(|| {self.hd[i] = 0.0});
+                            ui.separator();
+                            ui.label("Unfinished");
+                        }
                     }else{
                         let mut total = 0.0;
                         for i in 0..10 {
@@ -1240,18 +782,34 @@ egui::Window
                     for i in 0..10 {
                         ui.label(format!("{}.) {}",i,self.routine.as_ref().unwrap().skills[i].name()));
                         ui.horizontal(|ui| {
-                            ui.radio_value(&mut self.hd[i], 0.0, "0.0");
-                            ui.radio_value(&mut self.hd[i], 0.1, "0.1");
-                            ui.radio_value(&mut self.hd[i], 0.2, "0.2");
-                            ui.radio_value(&mut self.hd[i], 0.3, "0.3");
+                                ui.selectable_label(self.execution_1[i] == 0.0, "0.0").clicked().then(|| {self.hd[i] = 0.0});
+                                ui.separator();
+                                ui.selectable_label(self.execution_1[i] == 0.1, "0.1").clicked().then(|| {self.hd[i] = 0.1});
+                                ui.separator();
+                                ui.selectable_label(self.execution_1[i] == 0.2, "0.2").clicked().then(|| {self.hd[i] = 0.2});
+                                ui.separator();
+                                ui.selectable_label(self.execution_1[i] == 0.3, "0.3").clicked().then(|| {self.hd[i] = 0.3});
+                                ui.separator();
+                                ui.selectable_label(self.execution_1[i] == 0.4, "0.4").clicked().then(|| {self.hd[i] = 0.4});
+                                ui.separator();
+                                ui.selectable_label(self.execution_1[i] == 0.5, "0.5").clicked().then(|| {self.hd[i] = 0.5});
                         });
                     }
                 }
                 }
-
+                &Panel::Deductions => {
+                    ui.label("todo");
+                }
+                &Panel::Totals => {
+                    ui.label("todo");
+                }
+                &Panel::TOF => {
+                    ui.label("todo");
+                }
             }
                 
         });
+        ui.add_sized(ui.available_size(), egui::Label::new(""))
     });
     }
     
@@ -1310,6 +868,40 @@ async fn main() {
                     .then(|| {
                         data.judged.push(Judged::new());
                     });
+                ui.separator();
+                ui.collapsing( "Past Routines", |ui| {
+                    let mut delete:Vec<usize> = vec![];
+                    for (i, r) in data.judged.iter_mut().enumerate() {
+                        let toggle = !r.open;
+                        ui.horizontal(|ui| {
+                            ui.selectable_value(&mut r.open, toggle, match &r.routine {Some(a) => &a.name, None => "None"});
+                            ui.small_button("Delete").on_hover_text("Waring! Permanent").clicked().then(|| {
+                                delete.push(i);
+                                match fs::remove_file(format!("Data/judged/{}.bin", r.id)) {
+                                    Ok(_) => {},
+                                    Err(e) => {
+                                        error!("Error deleting file: {}", e);
+                                    }
+                                };
+                            })
+                        });
+                        ui.label(&r.date_of_creation);
+                        ui.separator();
+                    };
+                }).header_response.clicked().then(|| {
+                    for i in data.judged.iter_mut() {
+                        if i.routine.is_none() {
+                match savefile::load_file(format!("Data/routines/{}.bin", i.routine_id), 1) {
+                    Ok(routine) => {
+                        i.routine = Some(routine);
+                    }
+                    Err(e) => {
+                        error!("Error loading file: {}", e);
+                    }
+                }
+            }
+                    }
+                });
                 ui.heading("Video");
                 ui.separator();
                 ui.button("load video")

@@ -7,7 +7,6 @@ use macroquad::texture::Texture2D;
 use nfd2::Response;
 
 
-pub const FRAMERATE: f32 = 48.0;
 
 pub struct Video {
     pub path: String,
@@ -21,6 +20,7 @@ pub struct Video {
     pub drag_one: usize,
     pub points: Vec<f32>,
     add_points: bool,
+    
 }
 
 impl Video {
@@ -40,7 +40,7 @@ impl Video {
             .duration("30")
             .input(&self.path)
             .hide_banner()
-            .filter(format!("fps=fps={}", FRAMERATE).as_str())
+            .filter(format!("fps=fps={}", 48.0).as_str())
             .args(match self.timestamps {true => ["-vf","scale=w='if(gte(iw,ih),720,-1)':h='if(lt(iw,ih),720,-1)', drawtext=fontsize=50:fontcolor=GreenYellow:text='%{e\\:t}':x=(w-text_w):y=(h-text_h)"], false => ["",""]})
             .args(["-f", "rawvideo", "-pix_fmt", "rgba", "-"])
             // .rawvideo()
@@ -73,6 +73,7 @@ impl Video {
     }
 
     pub fn display(&mut self, egui_ctx: &egui::Context) {
+        let framerate = match self.textures.last() {Some(a) => {a.1}, None => 0.0}/self.textures.len() as f32;
         egui::Window::new("Video")
             .scroll2([true, false])
             .min_height(match self.textures.get(self.current_frame) {
@@ -116,7 +117,7 @@ impl Video {
                                 .drag_value_speed(0.5),
                         );
 
-                        fn point_label(p: f64, range: &RangeInclusive<f64>) -> String {
+                        fn point_label(p: f64, _range: &RangeInclusive<f64>) -> String {
                             format!("{p}sec")
                         }
 
@@ -127,7 +128,6 @@ impl Video {
                         let mut ToF: f32 = 0.0;
 
                         self.points.sort_by(|a, b| a.partial_cmp(b).unwrap());
-                        let mut remove_point: Option<usize> = None;
                         let bar = Plot::new("my_plot")
                             .show_background(true)
                             .allow_drag(false)
@@ -140,7 +140,7 @@ impl Video {
                             .label_formatter(label_formatter)
                             .x_axis_formatter(point_label)
                             .view_aspect(1200.0)
-                            .include_x(self.textures.len() as f32 / FRAMERATE)
+                            .include_x(self.textures[self.textures.len()-1].1)
                             .show(ui, |plot_ui| {
 
                                 for (j, i) in self.points.iter().enumerate() {
@@ -183,16 +183,13 @@ impl Video {
                                 }
                                 
                                 plot_ui.vline(
-                                    VLine::new(self.drag_one as f32 / FRAMERATE)
+                                    VLine::new(self.drag_one as f32 / framerate)
                                         .highlight(self.current_frame == self.drag_one)
                                         .color(egui::Color32::from_rgb(0, 0, 255)),
                                 );
                             })
                             .response;
 
-                        if let Some(i) = remove_point {
-                            self.points.remove(i);
-                        }
 
                         ui.horizontal(|ui| {
                             if ui
@@ -215,17 +212,18 @@ impl Video {
                                     as usize)
                                     .clamp(0, self.textures.len() - 1);
                                 if self.add_points {
-                                    if match self.points.iter().map(|p| (((p-self.current_frame as f32 / FRAMERATE)*100.0) as i32).abs()).min() {Some(a) => a < 5, _ => false}  {
+                                    if match self.points.iter().map(|p| (self.textures[self.current_frame].1).abs()).fold(f32::MAX, |acc, e| acc.min(e)) {a if a != f32::MAX => a < 5.0, _ => false}  {
                                         ui.label("remove point");
                                         egui_ctx.output_mut(|o| {
                                             o.cursor_icon = egui::CursorIcon::NotAllowed;
                                         });
                                         if ui.input(|i| i.pointer.any_click()) {
-                                            self.points.retain(|p| (((p-self.current_frame as f32 / FRAMERATE)*100.0) as i32).abs() > 5);
+
+                                            self.points.retain(|p| ((self.textures[self.current_frame].1) as i32).abs() > 5);
                                         }
                                     } else {
                                         if ui.input(|i| i.pointer.any_click()) {
-                                            self.points.push(self.current_frame as f32 / FRAMERATE);
+                                            self.points.push(self.textures[self.current_frame].1);
                                             
                                         }
                                     }

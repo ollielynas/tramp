@@ -1,5 +1,5 @@
-use egui::{ widgets, Id, Pos2 };
-use macroquad::{ prelude::*, time };
+use egui::{ Id };
+use macroquad::{ prelude::* };
 use std::{ fs, io::{ self, stdout, Write }, ops::RangeInclusive, process::Stdio, time::Duration };
 mod common_skills;
 use common_skills::SKILLS;
@@ -9,17 +9,15 @@ use savefile::prelude::*;
 use std::time::{ Instant, UNIX_EPOCH };
 #[macro_use]
 extern crate savefile_derive;
-use nfd2::Response;
+use nfd2;
 use std::env;
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
 
-use chrono::{ DateTime, Utc };
+use chrono;
 
-use ffmpeg_sidecar::{ self, command::FfmpegCommand, event::FfmpegEvent };
-extern crate clipboard;
-use clipboard::ClipboardProvider;
-use clipboard::ClipboardContext;
+use ffmpeg_sidecar::{ self};
+
 mod skill;
 use skill::*;
 
@@ -119,7 +117,7 @@ impl Routine {
                     Tab::Info => {
                         ui.label(
                             format!(
-                                "Total Difficulty: {}",
+                                "Total Difficulty: {:.2}",
                                 self.skills
                                     .iter()
                                     .map(|s| s.diff())
@@ -282,6 +280,7 @@ struct Data {
     routines: Vec<Routine>,
     theme: WindowTheme,
     judged: Vec<Judged>,
+    zoom: f32,
 }
 
 impl Data {
@@ -342,12 +341,24 @@ impl Data {
             Ok(_) => {}
             Err(e) => { error!("Error saving file: {}", e) }
         }
+        match savefile::save_file("Data/zoom.bin", 1, &self.zoom) {
+            Ok(_) => {}
+            Err(e) => { error!("Error saving file: {}", e) }
+        }
     }
 
     fn load_files(&mut self) {
         match savefile::load_file("Data/theme.bin", 1) {
             Ok(theme) => {
                 self.theme = theme;
+            }
+            Err(e) => {
+                error!("Error loading file: {}", e);
+            }
+        }
+        match savefile::load_file("Data/zoom.bin", 1) {
+            Ok(zoom) => {
+                self.zoom = zoom;
             }
             Err(e) => {
                 error!("Error loading file: {}", e);
@@ -577,7 +588,7 @@ impl Judged {
                     
                 }
                 &Panel::Diff => {
-                    ui.label(format!("Total Difficulty: +{}" ,(0..10).map(|i|(self.routine.as_ref().unwrap().skills[i].diff()*100.0)as i32).sum::<i32>()as f32 /100.0));
+                    ui.label(format!("Total Difficulty: +{:.2}" ,(0..10).map(|i|(self.routine.as_ref().unwrap().skills[i].diff()*100.0)as i32).sum::<i32>()as f32 /100.0));
                     ui.separator();
                     for i in 0..10 {
                     ui.label(format!("{}.) {}",i+1,self.routine.as_ref().unwrap().skills[i].diff()));
@@ -589,7 +600,7 @@ impl Judged {
                     for i in 0..10 {
                         total += self.hd[i];
                     }
-                    ui.heading(format!("Total HD: -{}" ,total));
+                    ui.heading(format!("Total HD: -{:.2}" ,total));
                     for i in 0..10 {
                         ui.label(format!("{}.) {}",i,self.routine.as_ref().unwrap().skills[i].name()));
                         ui.horizontal(|ui| {
@@ -601,7 +612,7 @@ impl Judged {
                     }
                 }
                 &Panel::Execution => {
-                    ui.label(format!("Execution: -{}", match self.five_juges {
+                    ui.label(format!("Execution: -{:.2}", match self.five_juges {
                         false => {self.execution_1.iter().sum::<f32>()},
                         true => {
                             let mut totals = self.execution_5.iter().map(|x| x.iter().sum::<f32>()).collect::<Vec<f32>>();
@@ -620,8 +631,8 @@ impl Judged {
                         for i in 0..10 {
                         total += self.hd[i];
                     }
-                    total = (total*10.0);
-                    ui.label(format!("Total HD: -{}" ,total));
+                    total = total*10.0;
+                    ui.label(format!("Total HD: -{:.2}" ,total));
                     for i in 0..10 {
                         ui.label(format!("{}.) {}",i,self.routine.as_ref().unwrap().skills[i].name()));
                         ui.horizontal(|ui| {
@@ -656,21 +667,29 @@ impl Judged {
 
 #[macroquad::main("Trampoline thing")]
 async fn main() {
+    let mut  og_ppp = 0.0;
     let mut now = Instant::now();
     // get text input from user
     let mut data = Data {
+        zoom: 1.0,
         routines: vec![],
         theme: WindowTheme::Light,
         judged: vec![],
     };
-
+    
     // let mut
-
+    
+    let mut fonts = egui::FontDefinitions::default();
     ffmpeg_sidecar::download::auto_download().unwrap();
-
+    
     data.load_files();
     egui_macroquad::ui(|egui_ctx| {
         data.theme.set_theme(egui_ctx);
+        og_ppp = egui_ctx.pixels_per_point();
+        egui_phosphor::add_to_fonts(&mut fonts);
+        egui_ctx.set_pixels_per_point(og_ppp * data.zoom);
+
+    egui_ctx.set_fonts(fonts);
     });
 
     let mut videos: Vec<Video> = vec![];
@@ -690,24 +709,24 @@ async fn main() {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.heading("Routines");
                 ui.separator();
-                ui.button("New Routine")
+                ui.button(egui_phosphor::icons::PLUS.to_owned()+" New Routine")
                     .clicked()
                     .then(|| {
                         data.routines.push(Routine::blank());
                     });
-                ui.menu_button("edit routine", |ui| {
+                ui.menu_button(egui_phosphor::icons::PENCIL.to_owned() + " Edit Routine", |ui| {
                     for r in data.routines.iter_mut() {
                         let toggle = !r.open;
                         ui.selectable_value(&mut r.open, toggle, &r.name);
                     }
                 });
                 
-                ui.button("Judge Routine")
+                ui.button(format!("{} Judge Routine", egui_phosphor::BOOK_BOOKMARK))
                     .clicked()
                     .then(|| {
                         data.judged.push(Judged::new());
                     });
-                ui.separator();
+                    
                 ui.collapsing( "Past Routines", |ui| {
                     let mut delete:Vec<usize> = vec![];
                     for (i, r) in data.judged.iter_mut().enumerate() {
@@ -743,7 +762,7 @@ async fn main() {
                 });
                 ui.heading("Video");
                 ui.separator();
-                ui.button("load video")
+                ui.button(format!("{} load video", egui_phosphor::FILE_VIDEO))
                     .clicked()
                     .then(|| {
                         videos.push(Video::new());
@@ -754,21 +773,21 @@ async fn main() {
                         ui.selectable_value(&mut r.open, toggle, &r.path);
                     }
                 });
-                ui.button("Update/download ffmpeg")
+                ui.button(format!("{} Update/download ffmpeg", egui_phosphor::CLOUD_ARROW_DOWN))
                     .clicked()
                     .then(|| {
                         ffmpeg_sidecar::download::auto_download().unwrap();
                     });
                 ui.heading("Files");
                 ui.separator();
-                ui.button("Save")
+                ui.button(format!("{} Save", egui_phosphor::FLOPPY_DISK))
                     .clicked()
                     .then(|| {
                         data.save();
                     });
                 ui.heading("Settings");
                 ui.separator();
-                ui.menu_button("UI Style", |ui| {
+                ui.menu_button(format!("{} UI Style", egui_phosphor::PALETTE), |ui| {
                     for s in WindowTheme::iter() {
                         ui.selectable_value(&mut data.theme, s, &format!("{:?}", s));
                     }
@@ -778,6 +797,21 @@ async fn main() {
                         data.theme.set_theme(egui_ctx);
                     });
             });
+
+            ui.horizontal(|ui| {
+                ui.label("Zoom");
+                ui.small_button(egui_phosphor::MAGNIFYING_GLASS_MINUS).clicked().then(|| {
+                    data.zoom -= 0.1;
+                    egui_ctx.set_pixels_per_point(og_ppp * data.zoom)
+                });
+                ui.label(&format!("{:.1}", data.zoom));
+                ui.small_button(egui_phosphor::MAGNIFYING_GLASS_PLUS).clicked().then(|| {
+                    data.zoom += 0.1;
+                    egui_ctx.set_pixels_per_point(og_ppp * data.zoom)
+                });
+                
+            });
+
             for i in videos.iter_mut() {
                 if i.open {
                     i.display(egui_ctx);
@@ -797,6 +831,9 @@ async fn main() {
         egui_macroquad::draw();
         for v in &videos {
             if v.show_video && v.open {
+                if v.textures.len() == 0 {
+                    break
+                }
                 let index = clamp(v.current_frame, 0, v.textures.len() - 1);
                 let frame = &v.textures[index];
                 draw_texture_ex(frame.0, v.rect[0], v.rect[1], WHITE, DrawTextureParams {

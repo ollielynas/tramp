@@ -20,6 +20,8 @@ pub struct Video {
     id: String,
     thread: Vec<std::thread::JoinHandle<Vec<OutputVideoFrame>>>,
     interpolate: bool,
+    pub full_size: bool,
+    skill_tof: [f32;10],
 }
 
 impl Video {
@@ -84,6 +86,7 @@ impl Video {
     }
 
     pub fn display(&mut self, egui_ctx: &egui::Context) {
+        
         let framerate =
             (match self.textures.last() {
                 Some(a) => { a.1 }
@@ -91,12 +94,15 @@ impl Video {
             }) / (self.textures.len() as f32);
         egui::Window
             ::new("Video")
+            .id(egui::Id::new(self.id.clone()))
             .scroll2([true, false])
             .min_height(match self.textures.get(self.current_frame) {
                 Some(a) => a.0.height() + 10.0,
                 _ => 0.0,
             })
             .show(egui_ctx, |ui| {
+
+                self.full_size = true;
                 // Show the image:
                 if self.thread.len() != 0 {
                     ui.heading("Loading...");
@@ -125,7 +131,6 @@ impl Video {
                 ui.separator();
                 match self.textures.len() {
                     0 => {
-                        self.show_video = false;
 
                         let mut hovered_files = vec![];
                         let mut droped_file: Option<String> = None;
@@ -205,13 +210,33 @@ impl Video {
                         ui.checkbox(&mut self.interpolate, format!("{} interpolate frames", egui_phosphor::INTERSECT_SQUARE));
                     }
                     _ => {
+                        let frame_data = self.textures[self.current_frame].0;
+                        let timestamp = self.textures[self.current_frame].1;
+
                         if self.current_frame >= self.textures.len() {
                             self.current_frame = 0;
                         }
                         let ratio =
-                            (self.textures[self.current_frame].0.height() as f32) /
-                            (self.textures[self.current_frame].0.width() as f32);
+                            (frame_data.height() as f32) /
+                            (frame_data.width() as f32);
                         
+
+                        let r = ui.add_sized([ui.available_width(), ui.available_width()*ratio], egui::Label::new(
+                            match self.show_video {
+                                true => {
+                                    "".to_owned()
+                                }
+                                false => {
+                                    format!("{} {}x{}\n",
+                                    egui_phosphor::FRAME_CORNERS,
+                                    frame_data.width(),
+                                    frame_data.height()
+                                )
+                                }
+                            }
+                        ));
+
+                        self.rect = [r.rect.left() , r.rect.top(), r.rect.width(), r.rect.height()];
 
                         fn point_label(p: f64, _range: &RangeInclusive<f64>) -> String {
                             format!("{p}sec")
@@ -222,7 +247,7 @@ impl Video {
                         }
 
                         let mut ToF: f32 = 0.0;
-
+                        self.skill_tof = [0.0;10];
                         self.points.sort_by(|a, b| a.partial_cmp(b).unwrap());
                         let bar = Plot::new("my_plot")
                             .show_background(true)
@@ -263,6 +288,10 @@ impl Video {
                                             );
                                         }
                                         _ => {
+                                            ToF += *i - self.points[j - 1];
+                                            if j/2 < 10 && j/2 > 2 {
+                                                self.skill_tof[j/2] =  self.points[j - 3]- *i;
+                                            }
                                             plot_ui.polygon(
                                                 Polygon::new(
                                                     vec![
@@ -281,7 +310,6 @@ impl Video {
                                                     .color(egui::Color32::from_rgb(255, 0, 0))
                                                     .name("end jump")
                                             );
-                                            ToF += *i - self.points[j - 1];
                                         }
                                     }
                                 }
@@ -318,7 +346,7 @@ impl Video {
                                         if
                                             (
                                                 self.points[pt] -
-                                                self.textures[self.current_frame].1
+                                                timestamp
                                             ).abs() < 0.05
                                         {
                                             delete = true;
@@ -334,7 +362,7 @@ impl Video {
                                     if !delete {
                                         ui.label("Add point");
                                         if ui.input(|i| i.pointer.any_click()) {
-                                            self.points.push(self.textures[self.current_frame].1);
+                                            self.points.push(timestamp);
                                         }
                                     }
                                 } else {
@@ -363,7 +391,7 @@ impl Video {
                             ui.label(format!("ToF: {}", ToF));
                             if
                                 ui
-                                    .small_button(egui_phosphor::COPY)
+                                    .small_button(egui_phosphor::CLIPBOARD_TEXT)
                                     .on_hover_text("Copy to clipboard")
                                     .clicked()
                             {
@@ -375,7 +403,7 @@ impl Video {
 
                         ui.separator();
                         // number input
-                        ui.label(format!("Time: {}", self.textures[self.current_frame].1));
+                        ui.label(format!("Time: {}", timestamp));
                         ui.checkbox(&mut self.show_video, "Render Video");
                     }
                 }
@@ -395,6 +423,8 @@ impl Video {
     }
     pub fn new() -> Video {
         Video {
+            skill_tof: [0.0;10],
+            full_size: true,
             add_points: false,
             path: String::from(""),
             open: true,

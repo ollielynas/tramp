@@ -1,4 +1,4 @@
-use egui::{ Id };
+use egui::{ Id, plot::{PlotPoint, Plot, HLine, LineStyle, Points, PlotPoints, Line, Legend}, Color32 };
 use macroquad::{ prelude::* };
 use std::{ fs, io::{ self, stdout, Write }, ops::RangeInclusive, process::Stdio, time::Duration };
 mod common_skills;
@@ -370,7 +370,7 @@ impl Data {
                 Ok(file) => file,
                 Err(e) => {
                     error!("Error reading file: {}", e);
-                    return;
+                    continue;
                 }
             };
             let path = file.path();
@@ -378,14 +378,14 @@ impl Data {
                 Some(path) => path,
                 None => {
                     error!("Error reading path");
-                    return;
+                    continue;
                 }
             };
             match savefile::load_file(path, 1) {
                 Ok(routine) => self.routines.push(routine),
                 Err(e) => {
                     error!("Error loading file: {}", e);
-                    return;
+                    continue;
                 }
             };
         }
@@ -426,6 +426,7 @@ enum Panel {
     TOF,
     Execution,
     Deductions,
+    Graph,
 
 }
 
@@ -454,10 +455,12 @@ struct Judged {
     routine_id: String,
     execution_1: [f32;10],
     execution_5: [[f32;10];5],
-    five_juges: bool,
+    five_judges: bool,
     date_of_creation: String,
     hd: [f32;10],
     id: String,
+    tof_total: f32,
+    tof: [f32;10],
 
 }
 
@@ -469,11 +472,13 @@ impl Judged {
             routine_id: String::new(),
             execution_1: [0.0;10],
             execution_5: [[0.0;10];5],
-            five_juges: false,
+            five_judges: false,
             hd: [0.0;10],
             id: UNIX_EPOCH.elapsed().unwrap().as_secs_f32().to_string().replace(".", ""),
             open: true,
             date_of_creation: chrono::Local::now().format("%Y-%m-%d %H:%M").to_string(),
+            tof_total: 0.0,
+            tof: [0.0;10],
         }
     }
 
@@ -502,6 +507,15 @@ impl Judged {
                             .clicked()
                             .then(|| {
                                 self.panel = Panel::Routine;
+                            });
+                    }
+                    if self.panel == Panel::Graph {
+                        ui.label("Graph");
+                    } else {
+                        ui.small_button("Graph")
+                            .clicked()
+                            .then(|| {
+                                self.panel = Panel::Graph;
                             });
                     }
                     ui.separator();
@@ -612,7 +626,7 @@ impl Judged {
                     }
                 }
                 &Panel::Execution => {
-                    ui.label(format!("Execution: -{:.2}", match self.five_juges {
+                    ui.label(format!("Execution: -{:.2}", match self.five_judges {
                         false => {self.execution_1.iter().sum::<f32>()},
                         true => {
                             let mut totals = self.execution_5.iter().map(|x| x.iter().sum::<f32>()).collect::<Vec<f32>>();
@@ -620,7 +634,7 @@ impl Judged {
                             totals[1..4].iter().sum::<f32>()
                         }
                     }));
-                    if self.five_juges {
+                    if self.five_judges {
                         for i in 0..10 {
                         ui.selectable_label(self.execution_1[i] == 0.0, "0.0").clicked().then(|| {self.hd[i] = 0.0});
                             ui.separator();
@@ -653,7 +667,56 @@ impl Judged {
                     ui.label("todo");
                 }
                 &Panel::TOF => {
-                    ui.label("todo");
+                            ui.horizontal(|ui| {
+                                ui.label("Total TOF ");
+                            ui.add(egui::DragValue::new(&mut self.tof_total).speed(0.1).clamp_range(0.0..=50.0).fixed_decimals(2)
+                                    .suffix("sec"));
+                            });
+                            ui.separator();
+                            for i in 0..10 {
+                                ui.horizontal(|ui| {
+                                ui.label(format!("{}.) ",i+1));
+                                if ui.add(egui::DragValue::new(&mut self.tof[i]).speed(0.01).clamp_range(0.0..=5.0)
+                                    .suffix("sec")).changed() {
+                                        self.tof_total = self.tof.iter().sum::<f32>();
+                                    };
+                                });
+                            }
+                }
+                &Panel::Graph => {
+
+                        fn point_label(p: f64, _range: &RangeInclusive<f64>) -> String {
+                            format!("{p}")
+                        }
+
+                        fn label_formatter(name: &str, p: &PlotPoint) -> String {
+                            format!("{} {:.2}", name, p.x)
+                        }
+                        
+
+                        Plot::new("my_plot")
+                            .label_formatter(label_formatter)
+                            .x_axis_formatter(point_label)
+                            .height(ui.available_height()*0.75)
+                            .legend(Legend::default())
+                            .show(ui, |plot_ui| {
+                                plot_ui.hline(HLine::new(self.tof_total/10.0).name("average time").color(Color32::RED).style(LineStyle::Dashed { length: 5.0 }));
+                                let points: PlotPoints  = (0..10).map(|i| [i as f64, self.tof[i] as f64]).collect();
+                                plot_ui.line(Line::new(points).color(Color32::RED).name("time of flight (sec)"));
+
+                                if self.five_judges {
+                                    for k in 0..5 {
+                                        plot_ui.hline(HLine::new(self.execution_5[k].iter().sum::<f32>()/10.0).name("average time").color(Color32::BLUE).style(LineStyle::Dashed { length: 5.0 }));
+                                let points: PlotPoints  = (0..10).map(|i| [i as f64, self.execution_5[k][i] as f64]).collect();
+                                plot_ui.line(Line::new(points).color(Color32::BLUE).name("Execution"));
+                                    }
+                                }else{
+                                plot_ui.hline(HLine::new(self.execution_1.iter().sum::<f32>()/10.0).name("average time").color(Color32::BLUE).style(LineStyle::Dashed { length: 5.0 }));
+                                let points: PlotPoints  = (0..10).map(|i| [i as f64, self.execution_1[i] as f64]).collect();
+                                plot_ui.line(Line::new(points).color(Color32::BLUE).name("Execution"));
+                                }
+                            });
+                        
                 }
             }
                 
@@ -802,7 +865,7 @@ async fn main() {
                 ui.label("Zoom");
                 ui.small_button(egui_phosphor::MAGNIFYING_GLASS_MINUS).clicked().then(|| {
                     data.zoom -= 0.1;
-                    egui_ctx.set_pixels_per_point(og_ppp * data.zoom)
+                    egui_ctx.set_pixels_per_point(og_ppp * data.zoom);
                 });
                 ui.label(&format!("{:.1}", data.zoom));
                 ui.small_button(egui_phosphor::MAGNIFYING_GLASS_PLUS).clicked().then(|| {
@@ -813,6 +876,7 @@ async fn main() {
             });
 
             for i in videos.iter_mut() {
+                i.full_size = false;
                 if i.open {
                     i.display(egui_ctx);
                     if i.kill {
@@ -836,8 +900,8 @@ async fn main() {
                 }
                 let index = clamp(v.current_frame, 0, v.textures.len() - 1);
                 let frame = &v.textures[index];
-                draw_texture_ex(frame.0, v.rect[0], v.rect[1], WHITE, DrawTextureParams {
-                    dest_size: Some(vec2(v.rect[2] - v.rect[0], v.rect[3] - v.rect[1])),
+                draw_texture_ex(frame.0, v.rect[0] * data.zoom, v.rect[1] * data.zoom, WHITE, DrawTextureParams {
+                    dest_size: Some(vec2(v.rect[2]*data.zoom, v.rect[3]*data.zoom)),
                     ..Default::default()
                 });
             }

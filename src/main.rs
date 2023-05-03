@@ -672,7 +672,19 @@ impl Judged {
                             ui.add(egui::DragValue::new(&mut self.tof_total).speed(0.1).clamp_range(0.0..=50.0).fixed_decimals(2)
                                     .suffix("sec"));
                             });
+                            let mut s= "".to_owned();
                             ui.separator();
+                            ui.horizontal(|ui| {
+                                ui.label("TOF ");
+                                if ui.text_edit_singleline(&mut s).changed() {
+                                    for (j,i) in s.split(",").map(|x| x.parse::<f32>().unwrap_or(0.0)).collect::<Vec<f32>>().iter().enumerate() {
+                                        self.tof[j as usize] = *i;
+                                    }
+                                    self.tof_total = self.tof.iter().sum::<f32>();
+                                };
+                                ui.label(format!("{}{}  Paste from keyboard", egui_phosphor::CLIPBOARD_TEXT, egui_phosphor::ARROW_FAT_LINES_DOWN));
+                            });
+
                             for i in 0..10 {
                                 ui.horizontal(|ui| {
                                 ui.label(format!("{}.) ",i+1));
@@ -700,21 +712,27 @@ impl Judged {
                             .height(ui.available_height()*0.75)
                             .legend(Legend::default())
                             .show(ui, |plot_ui| {
-                                plot_ui.hline(HLine::new(self.tof_total/10.0).name("average time").color(Color32::RED).style(LineStyle::Dashed { length: 5.0 }));
+                                plot_ui.hline(HLine::new(self.tof_total/10.0).name("average ToF").color(Color32::RED).style(LineStyle::Dashed { length: 5.0 }));
                                 let points: PlotPoints  = (0..10).map(|i| [i as f64, self.tof[i] as f64]).collect();
-                                plot_ui.line(Line::new(points).color(Color32::RED).name("time of flight (sec)"));
+                                plot_ui.line(Line::new(points).color(Color32::RED).name("ToF (sec)"));
 
                                 if self.five_judges {
                                     for k in 0..5 {
-                                        plot_ui.hline(HLine::new(self.execution_5[k].iter().sum::<f32>()/10.0).name("average time").color(Color32::BLUE).style(LineStyle::Dashed { length: 5.0 }));
+                                        plot_ui.hline(HLine::new(self.execution_5[k].iter().sum::<f32>()/10.0).name("average execution").color(Color32::BLUE).style(LineStyle::Dashed { length: 5.0 }));
                                 let points: PlotPoints  = (0..10).map(|i| [i as f64, self.execution_5[k][i] as f64]).collect();
                                 plot_ui.line(Line::new(points).color(Color32::BLUE).name("Execution"));
                                     }
                                 }else{
-                                plot_ui.hline(HLine::new(self.execution_1.iter().sum::<f32>()/10.0).name("average time").color(Color32::BLUE).style(LineStyle::Dashed { length: 5.0 }));
+                                plot_ui.hline(HLine::new(self.execution_1.iter().sum::<f32>()/10.0).name("average executition").color(Color32::BLUE).style(LineStyle::Dashed { length: 5.0 }));
                                 let points: PlotPoints  = (0..10).map(|i| [i as f64, self.execution_1[i] as f64]).collect();
                                 plot_ui.line(Line::new(points).color(Color32::BLUE).name("Execution"));
                                 }
+
+                                plot_ui.hline(HLine::new(self.execution_1.iter().sum::<f32>()/10.0).name("average HD").color(Color32::BLUE).style(LineStyle::Dashed { length: 5.0 }));
+
+                                let points: PlotPoints  = (0..10).map(|i| [i as f64, self.hd[i] as f64]).collect();
+                                plot_ui.line(Line::new(points).color(Color32::GREEN).name("HD"));
+
                             });
                         
                 }
@@ -784,7 +802,7 @@ async fn main() {
                     }
                 });
                 
-                ui.button(format!("{} Judge Routine", egui_phosphor::BOOK_BOOKMARK))
+                ui.button(format!("{} Judge New Routine", egui_phosphor::BOOK_BOOKMARK))
                     .clicked()
                     .then(|| {
                         data.judged.push(Judged::new());

@@ -1,8 +1,18 @@
+#[cfg_attr(
+  all(
+    target_os = "windows",
+    not(debug_assertions),
+  ),
+  windows_subsystem = "windows"
+)]
+
+
 use std::{ ops::RangeInclusive, time::UNIX_EPOCH };
 use egui::{plot::{ HLine, Plot, PlotPoint, Polygon, VLine }, PointerButton};
 use ffmpeg_sidecar::{ command::FfmpegCommand, event::{ FfmpegEvent, OutputVideoFrame } };
 use macroquad::texture::Texture2D;
 use nfd2::Response;
+
 
 pub struct Video {
     pub path: String,
@@ -41,24 +51,20 @@ impl Video {
         } else {
             path = path2.unwrap();
         }
+        let filter = format!("scale=w='if(gte(iw,ih),720,-1)':h='if(lt(iw,ih),720,-1)',{}, drawtext=fontsize=50:fontcolor=GreenYellow:text='%{{e\\:t}}':x=(w-text_w):y=(h-text_h)", match frame_interpolation {
+                        true => format!("minterpolate=fps={}:mi_mode=mci", 48.0),
+                        false => format!("fps=fps={}", 48.0),
+                    });
         FfmpegCommand::new()
             .duration("30")
             .args(["-ss", start_from.to_string().as_str()])
             .input(path)
-            .hide_banner()
-            .filter(
-                (
-                    match frame_interpolation {
-                        true => format!("minterpolate=fps={}:mi_mode=mci", 48.0),
-                        false => format!("fps=fps={}", 48.0),
-                    }
-                ).as_str()
-            )
+            
             .args(match timestamps {
                 true =>
                     [
                         "-vf",
-                        "scale=w='if(gte(iw,ih),720,-1)':h='if(lt(iw,ih),720,-1)', drawtext=fontsize=50:fontcolor=GreenYellow:text='%{e\\:t}':x=(w-text_w):y=(h-text_h)",
+                        &filter
                     ],
                 false => ["-vf", "scale=w='if(gte(iw,ih),720,-1)':h='if(lt(iw,ih),720,-1)'"],
             })
@@ -95,7 +101,8 @@ impl Video {
         egui::Window
             ::new("Video")
             .id(egui::Id::new(self.id.clone()))
-            .scroll2([true, false])
+            .scroll2([true, true])
+            
             .min_height(match self.textures.get(self.current_frame) {
                 Some(a) => a.0.height() + 10.0,
                 _ => 0.0,
@@ -153,6 +160,7 @@ impl Video {
                                 }
                             }
                         });
+
                         let file_input=
                             ui
                                 .add_sized(
@@ -245,9 +253,13 @@ impl Video {
                         fn label_formatter(name: &str, p: &PlotPoint) -> String {
                             format!("{} {:.2}sec", name, p.x)
                         }
-
                         let mut ToF: f32 = 0.0;
+
+                        
+                            
+
                         self.skill_tof = [0.0;10];
+                        
                         self.points.sort_by(|a, b| a.partial_cmp(b).unwrap());
                         let bar = Plot::new("my_plot")
                             .show_background(true)
@@ -283,14 +295,15 @@ impl Video {
                                             }
                                             plot_ui.vline(
                                                 VLine::new(*i)
+                                                    .highlight((timestamp -*i).abs() < 0.05)
                                                     .color(egui::Color32::from_rgb(0, 255, 0))
                                                     .name("start jump")
                                             );
                                         }
                                         _ => {
                                             ToF += *i - self.points[j - 1];
-                                            if j/2 < 10 && j/2 > 2 {
-                                                self.skill_tof[j/2] =  self.points[j - 3]- *i;
+                                            if j < 10 && j > 1 {
+                                                self.skill_tof[j/2] =  *i - self.points[j - 1];
                                             }
                                             plot_ui.polygon(
                                                 Polygon::new(
@@ -307,6 +320,7 @@ impl Video {
                                             );
                                             plot_ui.vline(
                                                 VLine::new(*i)
+                                                    .highlight((timestamp -*i).abs() < 0.05)
                                                     .color(egui::Color32::from_rgb(255, 0, 0))
                                                     .name("end jump")
                                             );
@@ -315,10 +329,11 @@ impl Video {
                                 }
 
                                 plot_ui.vline(
-                                    VLine::new((self.drag_one as f32) / framerate)
+                                    VLine::new(timestamp)
                                         .highlight(self.current_frame == self.drag_one)
                                         .color(egui::Color32::from_rgb(0, 0, 255))
                                 );
+
                             }).response;
 
                         ui.horizontal(|ui| {
@@ -380,6 +395,7 @@ impl Video {
                             }
                         }
 
+
                         ui.separator();
                         ui.label(
                             format!(
@@ -388,7 +404,7 @@ impl Video {
                             )
                         );
                         ui.horizontal(|ui| {
-                            ui.label(format!("ToF: {}", ToF));
+                            ui.label(format!("total ToF: {:.2}", ToF));
                             if
                                 ui
                                     .small_button(egui_phosphor::CLIPBOARD_TEXT)
@@ -397,6 +413,25 @@ impl Video {
                             {
                                 egui_ctx.output_mut(|o| {
                                     o.copied_text = format!("{}", ToF);
+                                });
+                            }
+                        });
+
+                        ui.horizontal(|ui| {
+                            ui.collapsing("Individual ToF", |ui| {
+                                for (i, j) in self.skill_tof.iter().enumerate() {
+                                    ui.label(format!("{}: {:.2}", i, j));
+                                }
+                            
+                            });
+                            if
+                                ui
+                                    .small_button(egui_phosphor::CLIPBOARD_TEXT)
+                                    .on_hover_text("Copy to clipboard")
+                                    .clicked()
+                            {
+                                egui_ctx.output_mut(|o| {
+                                    o.copied_text =  self.skill_tof.into_iter().map(|x| format!("{x:.2}")).collect::<Vec<String>>().join(",");
                                 });
                             }
                         });
@@ -439,7 +474,7 @@ impl Video {
             start_from: 0.0,
             thread: vec![],
             interpolate: false,
-            id: UNIX_EPOCH.elapsed().unwrap().as_secs_f32().to_string().replace(".", ""),
+            id: UNIX_EPOCH.elapsed().unwrap().as_millis().to_string().replace(".", ""),
         }
     }
 }

@@ -20,3 +20,9 @@ savefile = "0.12.0"
 savefile-derive = "0.12.0"
 strum = "0.24.1"
 strum_macros = "0.24.3"
+
+
+
+[profile.dev.package."egui" . "egui-phosphor" . "egui-macroquad"]
+opt-level = 3
+
